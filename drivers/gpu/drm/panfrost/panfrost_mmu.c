@@ -74,9 +74,13 @@ static int wait_ready(struct panfrost_device *pfdev, u32 as_nr)
 	u32 val;
 
 	/* Wait for the MMU status to indicate there is no active command, in
-	 * case one is pending. */
+	 * case one is pending. A LOCK or FLUSH_PT completes within a few
+	 * microseconds; polling every 10 us rounded each wait up to 10 us or
+	 * more, and mapping or unmapping a BO waits twice, which added tens of
+	 * milliseconds while an application created its first buffers. Poll
+	 * every microsecond (callers may hold as_lock, so stay atomic). */
 	ret = readl_relaxed_poll_timeout_atomic(pfdev->iomem + AS_STATUS(as_nr),
-		val, !(val & AS_STATUS_AS_ACTIVE), 10, 100000);
+		val, !(val & AS_STATUS_AS_ACTIVE), 1, 100000);
 
 	if (ret) {
 		/* The GPU hung, let's trigger a reset */
