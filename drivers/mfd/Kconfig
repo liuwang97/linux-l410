@@ -660,6 +660,17 @@ config MFD_HI6421_SPMI
 	  menus in order to enable them.
 	  We communicate with the Hi6421v600 via a SPMI bus.
 
+config MFD_HUAWEI_ECHUB
+	tristate "Huawei echub embedded controller"
+	depends on I2C && OF
+	depends on ARCH_HISI || COMPILE_TEST
+	select MFD_CORE
+	help
+	  Core driver for the embedded controller ("echub") of Huawei
+	  Kirin based laptops such as the Huawei Qingyun L410. It provides
+	  the EC protocol to the battery and LED drivers and drives the
+	  EC state sync GPIO.
+
 config MFD_HI655X_PMIC
 	tristate "HiSilicon Hi655X series PMU/Codec IC"
 	depends on ARCH_HISI || COMPILE_TEST
