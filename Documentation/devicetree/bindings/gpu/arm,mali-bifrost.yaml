@@ -19,6 +19,7 @@ properties:
           - enum:
               - allwinner,sun50i-h616-mali
               - amlogic,meson-g12a-mali
+              - hisilicon,kirin990-mali
               - mediatek,mt8183-mali
               - mediatek,mt8183b-mali
               - mediatek,mt8186-mali
@@ -112,6 +113,12 @@ properties:
       where voltage is in V, frequency is in MHz.
 
   dma-coherent: true
+
+  hisilicon,pctrl:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the Kirin 990 peripheral control block (PCTRL), which holds
+      the GPU RAM deep-sleep and memory striping controls.
 
   nvmem-cell-names:
     items:
