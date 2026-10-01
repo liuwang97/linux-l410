@@ -3,6 +3,15 @@
 menu "Hisilicon SoC drivers"
 	depends on ARCH_HISI || COMPILE_TEST
 
+config KIRIN_HW_VOTE
+	bool "HiSilicon Kirin 990 hardware vote (PMCTRL)"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on OF && HAS_IOMEM
+	help
+	  Frequency and voltage requests to the LPM3 power controller of the
+	  HiSilicon Kirin 990 (Huawei Qingyun L410), used by cpufreq and the
+	  peripheral DVFS code.
+
 config KUNPENG_HCCS
 	tristate "HCCS driver on Kunpeng SoC"
 	depends on ACPI
