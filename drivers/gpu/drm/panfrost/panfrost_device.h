@@ -101,6 +101,13 @@ struct panfrost_compatible {
 	/* Only required if num_pm_domains > 1. */
 	const char * const *pm_domain_names;
 
+	/*
+	 * The supplies only switch the GPU power on and off (e.g. a power
+	 * domain managed by firmware): don't hand them to the OPP core for
+	 * voltage scaling, the OPP table only carries frequencies.
+	 */
+	bool supplies_are_switches;
+
 	/* Vendor implementation quirks callback */
 	void (*vendor_quirk)(struct panfrost_device *pfdev);
 

@@ -138,7 +138,8 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	if (ret)
 		return ret;
 
-	ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
+	ret = pfdev->comp->supplies_are_switches ? 0 :
+	      devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
 	if (ret) {
 		/* Continue if the optional regulator is missing */
 		if (ret != -ENODEV) {

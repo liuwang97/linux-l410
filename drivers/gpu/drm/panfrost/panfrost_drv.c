@@ -868,9 +868,14 @@ static const struct panfrost_compatible amlogic_data = {
 	.vendor_quirk = panfrost_gpu_amlogic_quirk,
 };
 
+/*
+ * Kirin 990: "mali" is the GPU subsystem power switch in LPM3 firmware, which
+ * also picks the voltage for each frequency.
+ */
 static const struct panfrost_compatible hisi_kirin990_data = {
 	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
 	.supply_names = default_supplies,
+	.supplies_are_switches = true,
 	.num_pm_domains = 1,
 	.vendor_quirk = panfrost_gpu_hisi_kirin990_quirk,
 };
