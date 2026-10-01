@@ -167,6 +167,16 @@ config TI_MESSAGE_MANAGER
 	  multiple processors within the SoC. Select this driver if your
 	  platform has support for the hardware block.
 
+config KIRIN_IPC_MBOX
+	bool "HiSilicon Kirin IPC mailbox (HiIPCV230)"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on OF
+	help
+	  Mailbox controller for the HiIPCV230 IPC blocks of Kirin 970/980/990
+	  SoCs, used to talk to the LPM3 power controller, the audio DSP and
+	  the sensor hub. Built in because the clock and power drivers need it
+	  early.
+
 config HI3660_MBOX
 	tristate "Hi3660 Mailbox" if EXPERT
 	depends on (ARCH_HISI || COMPILE_TEST)

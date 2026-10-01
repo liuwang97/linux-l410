@@ -43,6 +43,8 @@ obj-$(CONFIG_XGENE_SLIMPRO_MBOX) += mailbox-xgene-slimpro.o
 
 obj-$(CONFIG_HI3660_MBOX)	+= hi3660-mailbox.o
 
+obj-$(CONFIG_KIRIN_IPC_MBOX)	+= kirin-ipc-mailbox.o
+
 obj-$(CONFIG_HI6220_MBOX)	+= hi6220-mailbox.o
 
 obj-$(CONFIG_BCM_PDC_MBOX)	+= bcm-pdc-mailbox.o
