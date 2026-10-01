@@ -5,3 +5,4 @@
 
 obj-$(CONFIG_DRM_HISI_HIBMC) += hibmc/
 obj-$(CONFIG_DRM_HISI_KIRIN) += kirin/
+obj-y += kirin990/

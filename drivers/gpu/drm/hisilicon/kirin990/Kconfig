@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config DRM_KIRIN990
+	tristate "DRM support for the HiSilicon Kirin 990 display subsystem"
+	depends on DRM && OF && (ARM64 || COMPILE_TEST)
+	select DRM_CLIENT_SELECTION
+	select DRM_KMS_HELPER
+	select DRM_GEM_DMA_HELPER
+	help
+	  Display subsystem (DSS v510) of the HiSilicon Kirin 990 SoC, as used
+	  in the Huawei Qingyun L410 laptop. The DRM driver is called "kirin",
+	  so that Mesa pairs it with the Panfrost GPU driver.
