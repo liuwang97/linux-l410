@@ -1,0 +1,54 @@
+// T9 laptop: keyboard, touchpad, EC, lid.
+//
+// The vendor kernel used legacy GPIO numbers (8 per pl061 bank, bank N = alias gpioN):
+//   232/236 i2c-hid IRQs -> gpio29 (fa8b1000) lines 0/4
+//   195 lid              -> gpio24 (fa8ac000) line 3, low = closed
+//   240 EC state sync    -> gpio30 (fa8b2000) line 0, high = running
+//   23  AC adapter       -> gpio2  (fe004000) line 7, high = online
+// Plain dtc, no cpp: GPIO_ACTIVE_LOW = 1, IRQ_TYPE_EDGE_FALLING = 2, IRQ_TYPE_LEVEL_LOW = 8.
+
+// Keyboard, emulated by the EC. The vendor driver used a falling edge trigger.
+// The first compatible keeps the vendor client name ("huawei-keyboard").
+&{/amba/i2c@FA04F000/hw_keyboard_i2c7@3A} {
+	compatible = "huawei-keyboard", "hid-over-i2c";
+	interrupts-extended = <&{/amba/gpio@fa8b1000} 0 2>;
+	/delete-property/ irq_gpio;
+};
+
+// Touchpad: Goodix 27C6:01E0 on this unit; other units carry an Elan part at 0x15.
+&{/amba/i2c@FA04E000/goodix_clickpad_i2c6@5d} {
+	compatible = "goodix-clickpad", "hid-over-i2c";
+	interrupts-extended = <&{/amba/gpio@fa8b1000} 4 8>;
+	/delete-property/ irq_gpio;
+};
+
+&{/amba/i2c@FA04E000/elan_clickpad_i2c6@15} {
+	compatible = "elan-clickpad", "hid-over-i2c";
+	interrupts-extended = <&{/amba/gpio@fa8b1000} 4 8>;
+	/delete-property/ irq_gpio;
+};
+
+// EC battery: AC adapter detect line
+&{/amba/i2c@FA04F000/echub_i2c@38/battery} {
+	ac-detect-gpios = <&{/amba/gpio@fe004000} 7 0>;
+};
+
+// EC state sync line
+&{/echub_state} {
+	sync-gpios = <&{/amba/gpio@fa8b2000} 0 0>;
+};
+
+// Lid switch: mainline gpio-keys instead of the vendor hw_gpio_key driver.
+// The vendor driver debounced the line for 900 ms.
+&{/echub_lid} {
+	compatible = "gpio-keys";
+
+	lid-switch {
+		label = "Lid";
+		gpios = <&{/amba/gpio@fa8ac000} 3 1>;
+		linux,input-type = <5>;		// EV_SW
+		linux,code = <0>;		// SW_LID
+		debounce-interval = <900>;
+		wakeup-source;
+	};
+};

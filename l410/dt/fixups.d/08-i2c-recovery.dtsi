@@ -1,0 +1,63 @@
+// I2C bus recovery for the four DesignWare buses the vendor gave "cs-gpios" (SCL, SDA).
+//
+// 10-01: in the middle of a soak the touchpad bus (i2c-6) logged "lost arbitration" five
+// times, then every transfer timed out ("controller timed out", i2c-hid -110) and the
+// touchpad was dead until reboot: a slave left holding SDA low after an aborted transfer.
+// Re-probing the controller does not help; clocking SCL until SDA is released does. The
+// vendor kernel did that from these GPIOs. i2c-designware does it too (i2c_generic_scl_recovery
+// on a timeout or a busy bus) when the node has scl-gpios/sda-gpios and a "gpio" pinctrl
+// state; the I2C core moves the pins to "gpio" while it takes the GPIOs at probe and back to
+// "default" afterwards (the pl061 banks have gpio-ranges, so taking a line also muxes it).
+//
+// Plain dtc, no cpp: open drain = GPIO_SINGLE_ENDED | GPIO_LINE_OPEN_DRAIN = 6; mux function
+// 0 is GPIO on both IOMG blocks (pinctrl-single,gpio-range).
+
+&{/pinmux@fe102000} {
+	l410_i2c3_gpio: l410-i2c3-gpio {
+		pinctrl-single,pins = <0x10 0x00 0x14 0x00>;		// gpio005, gpio006
+	};
+	l410_i2c4_gpio: l410-i2c4-gpio {
+		pinctrl-single,pins = <0x40 0x00 0x44 0x00>;		// gpio029, gpio030
+	};
+	l410_i2c6_gpio: l410-i2c6-gpio {
+		pinctrl-single,pins = <0x110 0x00 0x114 0x00>;		// gpio237, gpio238
+	};
+};
+
+&{/pinmux@fa89c000} {
+	l410_i2c7_gpio: l410-i2c7-gpio {
+		pinctrl-single,pins = <0x730 0x00 0x734 0x00>;		// gpio177, gpio178
+	};
+};
+
+// i2c-3: smart PA amplifiers
+&{/amba/i2c@FA04C000} {
+	pinctrl-names = "default", "idle", "gpio";
+	pinctrl-2 = <&l410_i2c3_gpio>;
+	scl-gpios = <&{/amba/gpio@fe002000} 5 6>;
+	sda-gpios = <&{/amba/gpio@fe002000} 6 6>;
+};
+
+// i2c-4: smart PA amplifiers
+&{/amba/i2c@FA04D000} {
+	pinctrl-names = "default", "idle", "gpio";
+	pinctrl-2 = <&l410_i2c4_gpio>;
+	scl-gpios = <&{/amba/gpio@fe005000} 5 6>;
+	sda-gpios = <&{/amba/gpio@fe005000} 6 6>;
+};
+
+// i2c-6: touchpad
+&{/amba/i2c@FA04E000} {
+	pinctrl-names = "default", "idle", "gpio";
+	pinctrl-2 = <&l410_i2c6_gpio>;
+	scl-gpios = <&{/amba/gpio@fa8b1000} 5 6>;
+	sda-gpios = <&{/amba/gpio@fa8b1000} 6 6>;
+};
+
+// i2c-7: keyboard and EC (cs-gpios lists SCL = line 2, SDA = line 1)
+&{/amba/i2c@FA04F000} {
+	pinctrl-names = "default", "idle", "gpio";
+	pinctrl-2 = <&l410_i2c7_gpio>;
+	scl-gpios = <&{/amba/gpio@fa8aa000} 2 6>;
+	sda-gpios = <&{/amba/gpio@fa8aa000} 1 6>;
+};
