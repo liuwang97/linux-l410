@@ -488,3 +488,57 @@ bool update_other_load_avgs(struct rq *rq)
 		update_hw_load_avg(rq_clock_task(rq), rq, hw_pressure) |
 		update_irq_load_avg(rq, 0);
 }
+
+/*
+ * PELT multiplier (port of the Android / "sched/pelt: Introduce PELT
+ * multiplier" patches): 1, 2 or 4 give a 32, 16 or 8 ms half-life. Unlike
+ * those patches it can be changed at run time, so that the power profiles
+ * can switch it: /proc/sys/kernel/sched_pelt_multiplier.
+ */
+unsigned int sched_pelt_lshift __read_mostly;
+static unsigned int sysctl_sched_pelt_multiplier = 1;
+
+static int sched_pelt_multiplier_handler(const struct ctl_table *table, int write,
+					 void *buffer, size_t *lenp, loff_t *ppos)
+{
+	static DEFINE_MUTEX(pelt_mult_mutex);
+	unsigned int old;
+	int ret;
+
+	mutex_lock(&pelt_mult_mutex);
+	old = sysctl_sched_pelt_multiplier;
+	ret = proc_douintvec(table, write, buffer, lenp, ppos);
+	if (ret || !write)
+		goto out;
+
+	switch (sysctl_sched_pelt_multiplier) {
+	case 1:
+	case 2:
+	case 4:
+		WRITE_ONCE(sched_pelt_lshift, ilog2(sysctl_sched_pelt_multiplier));
+		break;
+	default:
+		sysctl_sched_pelt_multiplier = old;
+		ret = -EINVAL;
+	}
+out:
+	mutex_unlock(&pelt_mult_mutex);
+	return ret;
+}
+
+static const struct ctl_table sched_pelt_sysctls[] = {
+	{
+		.procname	= "sched_pelt_multiplier",
+		.data		= &sysctl_sched_pelt_multiplier,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= sched_pelt_multiplier_handler,
+	},
+};
+
+static int __init sched_pelt_sysctl_init(void)
+{
+	register_sysctl_init("kernel", sched_pelt_sysctls);
+	return 0;
+}
+late_initcall(sched_pelt_sysctl_init);
