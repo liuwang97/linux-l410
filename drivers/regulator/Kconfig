@@ -478,6 +478,15 @@ config REGULATOR_HI655X
 	  This driver provides support for the voltage regulators of the
 	  Hisilicon Hi655x PMIC device.
 
+config REGULATOR_HISI_SPMI
+	tristate "HiSilicon SPMI PMIC (Kirin 990 generation) regulators"
+	depends on MFD_HISI_SPMI_PMIC && OF
+	select REGMAP
+	help
+	  LDO and BUCK regulators of the SPMI PMIC used with the HiSilicon
+	  Kirin 990. The voltage tables and control registers come from the
+	  vendor firmware device tree.
+
 config REGULATOR_HI6421V600
 	tristate "HiSilicon Hi6421v600 PMIC voltage regulator support"
 	depends on MFD_HI6421_SPMI && OF
