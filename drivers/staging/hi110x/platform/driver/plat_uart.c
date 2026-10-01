@@ -10,6 +10,8 @@
  */
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/io.h>
+#include <linux/delay.h>
 #include <linux/serdev.h>
 
 #include "plat_uart.h"
@@ -43,8 +45,9 @@ void ps_uart_state_dump(struct ps_core_s *ps_core_d)
     if (ps_core_d == NULL) {
         return;
     }
-    ps_print_info("===uart state=== open:%d tx:%x rx:%x\n", ps_core_d->tty != NULL,
-                  oal_atomic_read(&(ps_core_d->tty_tx_cnt)), oal_atomic_read(&(ps_core_d->tty_rx_cnt)));
+    ps_print_info("===uart state=== open:%d tx:%x rx:%x tiocm:0x%x\n", ps_core_d->tty != NULL,
+                  oal_atomic_read(&(ps_core_d->tty_tx_cnt)), oal_atomic_read(&(ps_core_d->tty_rx_cnt)),
+                  ps_core_d->tty ? serdev_device_get_tiocm(ps_core_d->tty) : 0);
 }
 
 static size_t ps_serdev_receive(struct serdev_device *serdev, const u8 *data, size_t count)
@@ -118,9 +121,64 @@ STATIC void ps_clean_tx_skb_buf(struct ps_core_s *ps_core_d)
     }
 }
 
+/*
+ * The HiSilicon UARTs sit behind a PERI CRG reset bit that the vendor pl011 driver
+ * pulsed on every port startup ("reset-enable-flag", "reset-reg-base",
+ * "reset-controller-reg" = <assert deassert status bit> in the UART node). Upstream
+ * pl011 knows nothing about it and the BUART may be left in reset by the firmware, so
+ * do the same pulse before opening the port (it is closed at this point).
+ */
+static void ps_serdev_uart_reset(struct serdev_device *serdev)
+{
+    struct device_node *np = of_get_parent(serdev->dev.of_node);
+    u32 flag = 0, base[4], regs[4];
+    void __iomem *crg = NULL;
+    u32 before, after;
+    int i;
+
+    if (np == NULL) {
+        return;
+    }
+    if (of_property_read_u32(np, "reset-enable-flag", &flag) || !flag ||
+        of_property_read_u32_array(np, "reset-reg-base", base, 4) ||
+        of_property_read_u32_array(np, "reset-controller-reg", regs, 4) || regs[3] > 31) {
+        of_node_put(np);
+        return;
+    }
+    of_node_put(np);
+
+    crg = ioremap(((u64)base[0] << 32) | base[1], base[3]);
+    if (crg == NULL) {
+        return;
+    }
+    before = readl(crg + regs[2]);
+    writel(BIT(regs[3]), crg + regs[0]); /* assert */
+    for (i = 0; i < 100 && !(readl(crg + regs[2]) & BIT(regs[3])); i++) {
+        udelay(1);
+    }
+    writel(BIT(regs[3]), crg + regs[1]); /* deassert */
+    for (i = 0; i < 100 && (readl(crg + regs[2]) & BIT(regs[3])); i++) {
+        udelay(1);
+    }
+    after = readl(crg + regs[2]);
+    iounmap(crg);
+    ps_print_info("BUART reset pulse: bit %u was %s, now %s\n", regs[3],
+                  (before & BIT(regs[3])) ? "asserted" : "released",
+                  (after & BIT(regs[3])) ? "asserted" : "released");
+}
+
+/* bring-up knob: -1 = what the protocol code asks for, 0/1 = force RTS/CTS off/on */
+static int buart_flowctl = -1;
+module_param(buart_flowctl, int, 0644);
+MODULE_PARM_DESC(buart_flowctl, "BUART hardware flow control: -1 auto, 0 off, 1 on");
+
 static void ps_serdev_set_termios(struct serdev_device *serdev, long baud_rate, uint8_t enable_flowctl)
 {
     unsigned int real;
+
+    if (buart_flowctl >= 0) {
+        enable_flowctl = buart_flowctl ? FLOW_CTRL_ENABLE : FLOW_CTRL_DISABLE;
+    }
 
     serdev_device_set_flow_control(serdev, enable_flowctl == FLOW_CTRL_ENABLE);
     (void)serdev_device_set_parity(serdev, SERDEV_PARITY_NONE);
@@ -197,6 +255,7 @@ int32_t open_tty_drv(struct ps_core_s *ps_core_d)
     }
 
     serdev_device_set_drvdata(serdev, ps_core_d);
+    ps_serdev_uart_reset(serdev);
     ret = serdev_device_open(serdev);
     if (ret) {
         ps_print_err("failed to open BUART: %d\n", ret);
@@ -205,6 +264,7 @@ int32_t open_tty_drv(struct ps_core_s *ps_core_d)
     }
 
     ps_serdev_set_termios(serdev, ps_plat_d->baud_rate, ps_plat_d->flow_cntrl);
+    ps_print_info("BUART open, modem lines 0x%x\n", serdev_device_get_tiocm(serdev));
 
     ps_core_d->tty = serdev;
     ps_core_d->tty_have_open = true;
