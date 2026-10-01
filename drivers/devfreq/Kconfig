@@ -140,6 +140,14 @@ config ARM_MEDIATEK_CCI_DEVFREQ
 	  buck voltages and update a proper CCI frequency. Use the notification
 	  to get the regulator status.
 
+config ARM_KIRIN990_DDR_DEVFREQ
+	bool "HiSilicon Kirin 990 DDR frequency scaling"
+	depends on KIRIN_HW_VOTE
+	select PM_OPP
+	help
+	  Votes the DDR frequency of the HiSilicon Kirin 990 (Huawei Qingyun
+	  L410) through the PMCTRL hardware vote; LPM3 performs the DVFS.
+
 config ARM_RK3399_DMC_DEVFREQ
 	tristate "ARM RK3399 DMC DEVFREQ Driver"
 	depends on (ARCH_ROCKCHIP && HAVE_ARM_SMCCC) || \
