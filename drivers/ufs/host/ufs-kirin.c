@@ -170,6 +170,7 @@ struct ufs_kirin_host {
 	u32 tx_equalizer;
 	bool efuse_rhold;
 	bool in_suspend;
+	bool wp_armed_once;
 };
 
 static inline u32 ufs_sys_ctrl_readl(struct ufs_kirin_host *host, u32 reg)
@@ -741,6 +742,49 @@ static int ufs_kirin_pwr_change_notify(struct ufs_hba *hba,
 	return 0;
 }
 
+/*
+ * The firmware LUs (0-2) are configured with bLUWriteProtect = power-on write
+ * protect; the vendor kernel arms it on every device init by setting the
+ * volatile fPowerOnWPEn flag, which only a power cycle or device reset
+ * clears. Do the same, so the device itself rejects writes to them. This is a
+ * flag set, no descriptor or other persistent configuration is touched.
+ * apply_dev_quirks runs after fDeviceInit on every (re)initialisation of the
+ * device, i.e. also after resets that cleared the flag again.
+ */
+static bool protect_fw_luns = true;
+module_param(protect_fw_luns, bool, 0444);
+MODULE_PARM_DESC(protect_fw_luns, "Arm the power-on write protection of the firmware LUs (default: true)");
+
+static int ufs_kirin_apply_dev_quirks(struct ufs_hba *hba)
+{
+	struct ufs_kirin_host *host = ufshcd_get_variant(hba);
+	bool armed = false;
+	int err;
+
+	if (!protect_fw_luns)
+		return 0;
+
+	err = ufshcd_query_flag(hba, UPIU_QUERY_OPCODE_SET_FLAG,
+				QUERY_FLAG_IDN_PWR_ON_WPE, 0, NULL);
+	if (!err) {
+		/* the device needs ~1 ms before the protection takes effect */
+		usleep_range(1000, 1100);
+		err = ufshcd_query_flag(hba, UPIU_QUERY_OPCODE_READ_FLAG,
+					QUERY_FLAG_IDN_PWR_ON_WPE, 0, &armed);
+	}
+	if (err || !armed) {
+		dev_err(hba->dev, "failed to arm LU power-on write protection: %d\n", err);
+		return 0;
+	}
+
+	hba->dev_info.f_power_on_wp_en = true;
+	if (!host->wp_armed_once) {
+		host->wp_armed_once = true;
+		dev_info(hba->dev, "LU power-on write protection armed (fPowerOnWPEn)\n");
+	}
+	return 0;
+}
+
 static int ufs_kirin_device_reset(struct ufs_hba *hba)
 {
 	struct ufs_kirin_host *host = ufshcd_get_variant(hba);
@@ -926,6 +970,7 @@ static const struct ufs_hba_variant_ops ufs_hba_kirin_vops = {
 	.pwr_change_notify = ufs_kirin_pwr_change_notify,
 	.suspend = ufs_kirin_suspend,
 	.resume = ufs_kirin_resume,
+	.apply_dev_quirks = ufs_kirin_apply_dev_quirks,
 	.dbg_register_dump = ufs_kirin_dbg_register_dump,
 	.device_reset = ufs_kirin_device_reset,
 };
