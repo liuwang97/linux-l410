@@ -5566,12 +5566,18 @@ static irqreturn_t ufshcd_uic_cmd_compl(struct ufs_hba *hba, u32 intr_status)
 	struct uic_command *cmd;
 
 	guard(spinlock_irqsave)(hba->host->host_lock);
+
+	/*
+	 * An auto-hibern8 failure raises UHES/UHXS while no UIC command is
+	 * active; record it before bailing out, or the link stays broken until
+	 * the SCSI timeout fires and the error handler never learns why.
+	 */
+	if (ufshcd_is_auto_hibern8_error(hba, intr_status))
+		hba->errors |= (UFSHCD_UIC_HIBERN8_MASK & intr_status);
+
 	cmd = hba->active_uic_cmd;
 	if (!cmd)
 		goto unlock;
-
-	if (ufshcd_is_auto_hibern8_error(hba, intr_status))
-		hba->errors |= (UFSHCD_UIC_HIBERN8_MASK & intr_status);
 
 	if (intr_status & UIC_COMMAND_COMPL) {
 		cmd->argument2 |= ufshcd_get_uic_cmd_result(hba);
