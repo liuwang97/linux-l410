@@ -2,6 +2,8 @@
 
 #include "wlan_types.h"
 
+#include <linux/unaligned.h>
+
 #include "oal_net.h"
 #include "oal_cfg80211.h"
 #include "oal_ext_if.h"
@@ -1291,6 +1293,68 @@ OAL_STATIC int32_t wal_cfg80211_connect_sniffer_handle(oal_net_device_stru *net_
 }
 #endif
 
+/*
+ * nl80211 auth type -> wlan_auth_alg_mode_enum. The vendor enum has TBPEKE at 8, where upstream has
+ * NL80211_AUTHTYPE_AUTOMATIC, so "automatic" (no auth type from user space) must be translated or
+ * the hmac runs Huawei's TBPEKE instead of Open System / Shared Key.
+ */
+OAL_STATIC uint8_t wal_nl80211_auth_type(enum nl80211_auth_type auth_type)
+{
+    return (auth_type == NL80211_AUTHTYPE_AUTOMATIC) ? WLAN_WITP_AUTH_AUTOMATIC : (uint8_t)auth_type;
+}
+
+/* RSN element in the connect IEs lists at least one PMKID */
+OAL_STATIC oal_bool_enum_uint8 wal_rsn_ie_has_pmkid(const uint8_t *ies, size_t ies_len)
+{
+    const uint8_t *rsn = cfg80211_find_ie(WLAN_EID_RSN, ies, ies_len);
+    uint32_t len, pos;
+
+    if (rsn == NULL) {
+        return OAL_FALSE;
+    }
+    len = rsn[1];
+    rsn += 2;
+    pos = 2 + 4; /* version, group cipher */
+    if (pos + 2 > len) {
+        return OAL_FALSE;
+    }
+    pos += 2 + 4 * get_unaligned_le16(rsn + pos); /* pairwise ciphers */
+    if (pos + 2 > len) {
+        return OAL_FALSE;
+    }
+    pos += 2 + 4 * get_unaligned_le16(rsn + pos) + 2; /* AKMs, RSN capabilities */
+    if (pos + 2 > len) {
+        return OAL_FALSE;
+    }
+    return get_unaligned_le16(rsn + pos) != 0;
+}
+
+/*
+ * The hmac runs SAE (external auth through wpa_supplicant) only when the auth type is SAE. wpa_supplicant's
+ * connect path (no SME in user space) passes Open System instead when the network has auth_alg=OPEN, which
+ * NetworkManager sets for profiles with wifi-security.auth-alg=open, as plasma-nm writes them for WPA3.
+ * Open System + SAE AKM without a PMKID then associates without any PMK, the AP deauthenticates a second
+ * later and NetworkManager asks for the password again. Run SAE for that case. Open System with a PMKID
+ * stays: that is SAE PMKSA caching, which the hmac handles (hmac_update_sae_connect_param).
+ */
+OAL_STATIC uint8_t wal_cfg80211_connect_auth_type(oal_cfg80211_conn_stru *sme)
+{
+    int32_t i;
+
+    if (sme->auth_type != NL80211_AUTHTYPE_OPEN_SYSTEM && sme->auth_type != NL80211_AUTHTYPE_AUTOMATIC) {
+        return wal_nl80211_auth_type(sme->auth_type);
+    }
+    for (i = 0; i < sme->crypto.n_akm_suites && i < (int32_t)ARRAY_SIZE(sme->crypto.akm_suites); i++) {
+        if ((sme->crypto.akm_suites[i] == WLAN_AKM_SUITE_SAE ||
+            sme->crypto.akm_suites[i] == WLAN_AKM_SUITE_FT_OVER_SAE) &&
+            !wal_rsn_ie_has_pmkid(sme->ie, sme->ie_len)) {
+            oam_warning_log1(0, OAM_SF_SAE, "{wal_cfg80211_connect::SAE AKM with auth_type[%d], use SAE}",
+                sme->auth_type);
+            return WLAN_WITP_AUTH_SAE;
+        }
+    }
+    return wal_nl80211_auth_type(sme->auth_type);
+}
 
 OAL_STATIC int32_t wal_cfg80211_connect(oal_wiphy_stru *pst_wiphy, oal_net_device_stru *pst_net_device,
     oal_cfg80211_conn_stru *pst_sme)
@@ -1329,7 +1393,7 @@ OAL_STATIC int32_t wal_cfg80211_connect(oal_wiphy_stru *pst_wiphy, oal_net_devic
 
     /* 解析内核下发的安全相关参数 */
     /* 设置认证类型 */
-    st_mac_conn_param.en_auth_type = pst_sme->auth_type;
+    st_mac_conn_param.en_auth_type = wal_cfg80211_connect_auth_type(pst_sme);
 
     /* 设置加密能力 */
     st_mac_conn_param.en_privacy = pst_sme->privacy;
@@ -2274,7 +2338,7 @@ OAL_STATIC int32_t wal_cfg80211_start_ap(oal_wiphy_stru *pst_wiphy,
     /*****************************************************************************
         2.2 设置auth mode信息
     *****************************************************************************/
-    en_auth_algs = pst_ap_settings->auth_type;
+    en_auth_algs = wal_nl80211_auth_type(pst_ap_settings->auth_type);
 
     l_ret = wal_cfg80211_set_auth_mode(pst_netdev, en_auth_algs);
     if (l_ret != OAL_SUCC) {

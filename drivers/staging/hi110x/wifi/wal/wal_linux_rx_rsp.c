@@ -902,6 +902,8 @@ uint32_t wal_report_external_auth_req(frw_event_mem_stru *pst_event_mem)
 
     pst_ext_auth_req = (hmac_external_auth_req_stru *)(pst_event->auc_event_data);
 
+    /* cfg80211 reports mld_addr when it is not all zero (MLO SAE in newer wpa_supplicant): clear it */
+    memset_s(&st_external_auth_req, sizeof(st_external_auth_req), 0, sizeof(st_external_auth_req));
     st_external_auth_req.action = pst_ext_auth_req->en_action;
     st_external_auth_req.key_mgmt_suite = pst_ext_auth_req->key_mgmt_suite;
     st_external_auth_req.status = pst_ext_auth_req->us_status;
