@@ -1,0 +1,27 @@
+// Base fixups applied to the firmware device tree for 6.18 kernels.
+
+// GRUB and the EFI stub rebuild /chosen; drop what the capture boot left behind.
+&{/chosen} {
+	/delete-property/ bootargs;
+	/delete-property/ linux,initrd-start;
+	/delete-property/ linux,initrd-end;
+	/delete-property/ kaslr-seed;
+	/delete-property/ linux,uefi-mmap-desc-ver;
+	/delete-property/ linux,uefi-mmap-desc-size;
+	/delete-property/ linux,uefi-mmap-size;
+	/delete-property/ linux,uefi-mmap-start;
+	/delete-property/ linux,uefi-system-table;
+};
+
+// Mainline ramoops wants its region under /reserved-memory. Same layout as the
+// vendor kernel so the vendor kernel can read our logs after a reset.
+&{/reserved-memory/pstore-mem} {
+	compatible = "ramoops";
+	record-size = <0x20000>;
+	console-size = <0x80000>;
+	ftrace-size = <0x0>;
+	pmsg-size = <0x20000>;
+	ecc-size = <0x0>;
+};
+
+/delete-node/ &{/ramoops};

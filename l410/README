@@ -1,0 +1,4 @@
+L410 build inputs (read by l410-mainline/scripts/build.sh):
+  configs/*.config      Kconfig fragments merged on top of arm64 defconfig, in name order
+  dt/fixups.d/*.dtsi    patches applied to the firmware device tree (dt/l410-firmware.dts in l410-mainline)
+Each bring-up track adds its own NN-<track> files.

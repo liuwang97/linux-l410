@@ -1,0 +1,5 @@
+// The firmware lists the standard PSCI 0.2 function IDs (SYSTEM_RESET 0x84000009 etc.)
+// but only claims "arm,psci" (v0.1), which leaves the kernel without reset/poweroff.
+&{/psci} {
+	compatible = "arm,psci-1.0", "arm,psci-0.2", "arm,psci";
+};
