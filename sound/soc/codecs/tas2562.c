@@ -745,6 +745,8 @@ static int tas2562_probe(struct i2c_client *client)
 	data->client = client;
 	data->dev = &client->dev;
 	data->model_id = (uintptr_t)i2c_get_match_data(client);
+	/* the chip comes out of reset at 0 dB, the top step of the control */
+	data->volume_lvl = 110;
 
 	tas2562_parse_dt(data);
 
