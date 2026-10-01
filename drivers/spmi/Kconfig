@@ -20,7 +20,7 @@ config SPMI_APPLE
 	  t8103 (M1) and t600x (M1 Pro/Max).
 
 config SPMI_HISI3670
-	tristate "Hisilicon 3670 SPMI Controller"
+	tristate "Hisilicon 3670/Kirin 990 SPMI Controller"
 	select IRQ_DOMAIN_HIERARCHY
 	depends on ARM64 || COMPILE_TEST
 	depends on HAS_IOMEM

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
+#include <linux/arm-smccc.h>
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
@@ -71,12 +72,24 @@ enum spmi_controller_cmd_op_code {
 #define SPMI_CONTROLLER_TIMEOUT_US		1000
 #define SPMI_CONTROLLER_MAX_TRANS_BYTES		16
 
+/*
+ * On Kirin 990 the controller belongs to the secure world ("spmi-always-sec"
+ * in the firmware device tree) and every PMIC register access goes through
+ * a SiP call to the trusted firmware, one byte at a time:
+ *   read:  x0 = FN | READ,  x1 = slave id, x2 = register  -> x0 = value or < 0
+ *   write: x0 = FN | WRITE, x1 = slave id, x2 = register, x3 = value
+ */
+#define SPMI_SMC_FN_ID				0xc500eee0
+#define SPMI_SMC_READ				0x0
+#define SPMI_SMC_WRITE				0x1
+
 struct spmi_controller_dev {
 	struct spmi_controller	*controller;
 	struct device		*dev;
 	void __iomem		*base;
 	spinlock_t		lock;
 	u32			channel;
+	bool			secure;
 };
 
 static int spmi_controller_wait_for_done(struct device *dev,
@@ -108,6 +121,79 @@ static int spmi_controller_wait_for_done(struct device *dev,
 	return -ETIMEDOUT;
 }
 
+static int spmi_smc_read(struct spmi_controller_dev *spmi_controller, u8 opc,
+			 u8 slave_id, u16 slave_addr, u8 *buf, size_t bc)
+{
+	struct arm_smccc_res res;
+	unsigned long flags;
+	size_t i;
+
+	switch (opc) {
+	case SPMI_CMD_READ:
+	case SPMI_CMD_EXT_READ:
+	case SPMI_CMD_EXT_READL:
+		break;
+	default:
+		dev_err(spmi_controller->dev, "invalid read cmd 0x%x\n", opc);
+		return -EINVAL;
+	}
+
+	spin_lock_irqsave(&spmi_controller->lock, flags);
+	for (i = 0; i < bc; i++) {
+		arm_smccc_smc(SPMI_SMC_FN_ID | SPMI_SMC_READ, slave_id,
+			      slave_addr + i, 0, 0, 0, 0, 0, &res);
+		if ((long)res.a0 < 0 || res.a0 > 0xff)
+			break;
+		buf[i] = res.a0;
+	}
+	spin_unlock_irqrestore(&spmi_controller->lock, flags);
+
+	if (i < bc) {
+		dev_err_ratelimited(spmi_controller->dev,
+				    "secure read sid %u addr 0x%x failed: %ld\n",
+				    slave_id, slave_addr + (u16)i, (long)res.a0);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int spmi_smc_write(struct spmi_controller_dev *spmi_controller, u8 opc,
+			  u8 slave_id, u16 slave_addr, const u8 *buf, size_t bc)
+{
+	struct arm_smccc_res res;
+	unsigned long flags;
+	size_t i;
+
+	switch (opc) {
+	case SPMI_CMD_WRITE:
+	case SPMI_CMD_EXT_WRITE:
+	case SPMI_CMD_EXT_WRITEL:
+		break;
+	default:
+		dev_err(spmi_controller->dev, "invalid write cmd 0x%x\n", opc);
+		return -EINVAL;
+	}
+
+	spin_lock_irqsave(&spmi_controller->lock, flags);
+	for (i = 0; i < bc; i++) {
+		arm_smccc_smc(SPMI_SMC_FN_ID | SPMI_SMC_WRITE, slave_id,
+			      slave_addr + i, buf[i], 0, 0, 0, 0, &res);
+		if ((long)res.a0 < 0)
+			break;
+	}
+	spin_unlock_irqrestore(&spmi_controller->lock, flags);
+
+	if (i < bc) {
+		dev_err_ratelimited(spmi_controller->dev,
+				    "secure write sid %u addr 0x%x failed: %ld\n",
+				    slave_id, slave_addr + (u16)i, (long)res.a0);
+		return -EIO;
+	}
+
+	return 0;
+}
+
 static int spmi_read_cmd(struct spmi_controller *ctrl,
 			 u8 opc, u8 slave_id, u16 slave_addr, u8 *__buf, size_t bc)
 {
@@ -125,6 +211,10 @@ static int spmi_read_cmd(struct spmi_controller *ctrl,
 			SPMI_CONTROLLER_MAX_TRANS_BYTES, bc);
 		return  -EINVAL;
 	}
+
+	if (spmi_controller->secure)
+		return spmi_smc_read(spmi_controller, opc, slave_id, slave_addr,
+				     __buf, bc);
 
 	switch (opc) {
 	case SPMI_CMD_READ:
@@ -201,6 +291,10 @@ static int spmi_write_cmd(struct spmi_controller *ctrl,
 			SPMI_CONTROLLER_MAX_TRANS_BYTES, bc);
 		return  -EINVAL;
 	}
+
+	if (spmi_controller->secure)
+		return spmi_smc_write(spmi_controller, opc, slave_id, slave_addr,
+				      __buf, bc);
 
 	switch (opc) {
 	case SPMI_CMD_WRITE:
@@ -290,10 +384,19 @@ static int spmi_controller_probe(struct platform_device *pdev)
 
 	ret = of_property_read_u32(pdev->dev.of_node, "hisilicon,spmi-channel",
 				   &spmi_controller->channel);
+	if (ret)	/* Kirin 990 vendor firmware binding */
+		ret = of_property_read_u32(pdev->dev.of_node, "spmi-channel",
+					   &spmi_controller->channel);
 	if (ret) {
 		dev_err(&pdev->dev, "can not get channel\n");
 		return -ENODEV;
 	}
+
+	spmi_controller->dev = &pdev->dev;
+	spmi_controller->secure = of_property_read_bool(pdev->dev.of_node,
+							"spmi-always-sec");
+	if (spmi_controller->secure)
+		dev_info(&pdev->dev, "register access through secure firmware\n");
 
 	platform_set_drvdata(pdev, spmi_controller);
 	dev_set_drvdata(&ctrl->dev, spmi_controller);
@@ -316,6 +419,10 @@ static int spmi_controller_probe(struct platform_device *pdev)
 static const struct of_device_id spmi_controller_match_table[] = {
 	{
 		.compatible = "hisilicon,kirin970-spmi-controller",
+	},
+	{
+		/* Kirin 990 vendor firmware device tree */
+		.compatible = "hisilicon,spmi-controller",
 	},
 	{}
 };
