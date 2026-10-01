@@ -568,6 +568,15 @@ STATIC int bt_register_hci_dev(struct pm_drv_data *pm_data)
 
     hdev->bus = HCI_UART;
 
+    /*
+     * The platform PM notifier unregisters hci0 on suspend and registers it
+     * again on resume (suspend_hi110x / resume_hi110x).  The HCI core's own PM
+     * notifier would then be (un)registered from inside the PM notifier chain,
+     * which deadlocks on the chain's rwsem: suspend hangs in
+     * PM_SUSPEND_PREPARE.  hci0 is gone while the system sleeps anyway.
+     */
+    hci_set_quirk(hdev, HCI_QUIRK_NO_SUSPEND_NOTIFIER);
+
     hci_set_drvdata(hdev, pm_data);
 
     hdev->manufacturer = 16; /* 16 is hci manufacture */
