@@ -1,0 +1,34 @@
+// T7 wifi-bt: Hi110x (Hi1103) WiFi/BT fixups on top of the firmware DT.
+
+// The vendor kernel looked up the chip's 32 kHz sleep clock by its output name
+// ("huawei,pmu_clk32b" = "clk_pmu32kb", the PMIC clk_pmu32kb gate, phandle 0x503).
+// Give the node a regular clocks/clock-names pair so devm_clk_get() works.
+&{/hi110x} {
+	clocks = <0x503>;
+	clock-names = "clk_pmu32kb";
+};
+
+// BUART (uart4, /dev/ttyAMA4 on the vendor kernel) carries the BT/FM/GNSS subsystem.
+// Describe the chip as a serdev child so the driver owns the port.
+&{/amba/uart@fa041000} {
+	/*
+	 * PIO: pl011 + hisi-dma64 is unvalidated, and the 32-byte FIFOs with RTS/CTS
+	 * are enough for the 4 Mbit/s BUART.
+	 */
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+
+	/*
+	 * The vendor pl011 driver applied the node's "clock-rate" (166 MHz) with
+	 * clk_set_rate(); upstream pl011 ignores it and the UART ran from the
+	 * 19.2 MHz clk_sys_ini leg of clkmux_uarth, which cannot make 4 Mbit/s.
+	 * Select clkdiv_uarth (332 MHz / 2) like the vendor kernel does.
+	 */
+	assigned-clocks = <0x152>, <0x153>;		/* clkmux_uarth, clkdiv_uarth */
+	assigned-clock-parents = <0x153>, <0>;
+	assigned-clock-rates = <0>, <166000000>;
+
+	bluetooth {
+		compatible = "hisilicon,hi110x-bfgx-uart";
+	};
+};
