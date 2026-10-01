@@ -418,17 +418,30 @@ void wal_netdev_open_en_monitor_limit(oal_net_device_stru *net_dev)
  * 函 数 名  : wal_wait_host_rf_cali_init_complete
  * 功能描述  : 等待开机上下电校准流程完成，避免在开机校准未完成时上层应用打开wifi
  */
-void wal_wait_host_rf_cali_init_complete(void)
+/*
+ * The boot calibration (host_rf_cali_init()) powers WLAN on, calibrates and powers it
+ * off again, and gives up by itself after about 45 s (device ready 20 s + retry 5 s,
+ * calibration data 15 s). NetworkManager opens wlan0 as soon as it is registered; if the
+ * open went ahead before that power-off (the vendor waited only 6 s, and calibration
+ * has been seen taking 9 s), the power-off pulled the chip from under the new VAP and
+ * the resulting PCIe exception took BT down with it. So wait for the whole sequence,
+ * and refuse the open if it is still running.
+ */
+#define WAL_WAIT_CALI_SEQUENCE_TIME 60000
+
+int32_t wal_wait_host_rf_cali_init_complete(void)
 {
     int32_t ret;
 
     /* 等待开机校准流程完成 */
     ret = oal_wait_event_timeout_m(g_wlan_cali_complete_wq, hmac_get_wlan_first_power_on_cali_flag() == OAL_FALSE,
-        (uint32_t)oal_msecs_to_jiffies(WAL_WAIT_CALI_COMPLETE_TIME));
+        (uint32_t)oal_msecs_to_jiffies(WAL_WAIT_CALI_SEQUENCE_TIME));
     if (ret == 0) {
         oam_error_log1(0, OAM_SF_ANY, "{wal_netdev_open::wait first powon rf cali complete [%d]ms timeout!}",
-            WAL_WAIT_CALI_COMPLETE_TIME);
+            WAL_WAIT_CALI_SEQUENCE_TIME);
+        return -OAL_EBUSY;
     }
+    return OAL_SUCC;
 }
 
 int32_t wal_netdev_open(oal_net_device_stru *pst_net_dev, uint8_t uc_entry_flag)
@@ -438,7 +451,10 @@ int32_t wal_netdev_open(oal_net_device_stru *pst_net_dev, uint8_t uc_entry_flag)
     if (oal_netdevice_flags(pst_net_dev) & OAL_IFF_RUNNING) {
         return OAL_SUCC;
     }
-    wal_wait_host_rf_cali_init_complete();
+    ret = wal_wait_host_rf_cali_init_complete();
+    if (ret != OAL_SUCC) {
+        return ret;
+    }
 #if (_PRE_OS_VERSION_LINUX == _PRE_OS_VERSION)
     g_netdev_is_open = OAL_TRUE;
 #endif
