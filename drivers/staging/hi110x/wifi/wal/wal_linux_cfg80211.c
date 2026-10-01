@@ -175,10 +175,7 @@ OAL_STATIC oal_ieee80211_iface_limit g_sta_p2p_limits[] = {
         .max = IEEE80211_IFACE_TYPE_P2P_GO_CLI_MAX_LIMIT,
         .types = BIT(NL80211_IFTYPE_P2P_GO) | BIT(NL80211_IFTYPE_P2P_CLIENT),
     },
-    {
-        .max = IEEE80211_IFACE_TYPE_P2P_DEV_MAX_LIMIT,
-        .types = BIT(NL80211_IFTYPE_P2P_DEVICE),
-    },
+    /* no stand-alone P2P_DEVICE wdev, see wal_set_nl80211_work_mode() */
 };
 #define IEEE80211_IFACE_COMBINATION_STA_P2P_DIFF_CHAN_NUMS 2
 #define IEEE80211_IFACE_COMBINATION_STA_P2P_MAX_INTERFACES 3
@@ -3355,8 +3352,14 @@ OAL_STATIC uint32_t wal_set_nl80211_work_mode(enum nl80211_iftype type, wlan_p2p
             return OAL_FAIL;
 
         case NL80211_IFTYPE_P2P_DEVICE:
-            *wdev = net_dev->ieee80211_ptr;
-            return OAL_TRUE;
+            /*
+             * The vendor handed back the wdev of its p2p0 netdev here. Current cfg80211
+             * registers the returned P2P-device wdev itself, so that wdev ended up twice
+             * on the wiphy's wdev list (a cycle: nl80211_register_mgmt spun forever).
+             * Stand-alone P2P-device wdevs are not supported.
+             */
+            oam_warning_log0(0, OAM_SF_CFG, "{wal_n80211_set_work_mode::P2P device wdev not supported}");
+            return OAL_FAIL;
 
         case NL80211_IFTYPE_P2P_CLIENT:
             *vap_mode = WLAN_VAP_MODE_BSS_STA;
@@ -5198,8 +5201,7 @@ uint32_t wal_cfg80211_init(void)
             pst_wiphy = pst_device->pst_wiphy;
 
             pst_wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) | BIT(NL80211_IFTYPE_AP)
-                                         | BIT(NL80211_IFTYPE_P2P_CLIENT) | BIT(NL80211_IFTYPE_P2P_GO)
-                                         | BIT(NL80211_IFTYPE_P2P_DEVICE);
+                                         | BIT(NL80211_IFTYPE_P2P_CLIENT) | BIT(NL80211_IFTYPE_P2P_GO);
 
             pst_wiphy->iface_combinations = g_sta_p2p_iface_combinations;
             pst_wiphy->n_iface_combinations = oal_array_size(g_sta_p2p_iface_combinations);
