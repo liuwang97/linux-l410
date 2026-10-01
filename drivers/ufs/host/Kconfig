@@ -95,6 +95,17 @@ config SCSI_UFS_HISI
 	  Select this if you have UFS controller on Hisilicon chipset.
 	  If unsure, say N.
 
+config SCSI_UFS_KIRIN
+	tristate "HiSilicon Kirin 990 UFS controller platform driver"
+	depends on (ARCH_HISI || COMPILE_TEST) && SCSI_UFSHCD_PLATFORM
+	help
+	  This selects the platform glue for the UFS host controller and
+	  Synopsys M-PHY of the HiSilicon Kirin 990 SoC as described by the
+	  vendor firmware device tree ("hisilicon,kirin-ufs"), e.g. on the
+	  Huawei Qingyun L410 laptop.
+
+	  If unsure, say N.
+
 config SCSI_UFS_RENESAS
 	tristate "Renesas specific hooks to UFS controller platform driver"
 	depends on (ARCH_RENESAS || COMPILE_TEST) && SCSI_UFSHCD_PLATFORM
