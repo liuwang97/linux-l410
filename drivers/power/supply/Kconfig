@@ -208,6 +208,13 @@ config BATTERY_PMU
 	  Say Y here to expose battery information on Apple machines
 	  through the generic battery class.
 
+config BATTERY_HUAWEI_ECHUB
+	tristate "Huawei echub EC battery and AC adapter"
+	depends on MFD_HUAWEI_ECHUB
+	help
+	  Battery and AC adapter reporting of the embedded controller of
+	  Huawei Kirin based laptops such as the Huawei Qingyun L410.
+
 config BATTERY_QCOM_BATTMGR
 	tristate "Qualcomm PMIC GLINK battery manager support"
 	depends on QCOM_PMIC_GLINK
