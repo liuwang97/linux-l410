@@ -263,6 +263,14 @@ config HISI_THERMAL
 	  thermal framework. cpufreq is used as the cooling device to throttle
 	  CPUs when the passive trip is crossed.
 
+config HISI_TSENS_SMC
+	tristate "HiSilicon Kirin 990 temperature sensors (firmware)"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on ARM64 && OF
+	help
+	  On-die temperature sensors of the HiSilicon Kirin 990 (Huawei
+	  Qingyun L410), read through the trusted firmware.
+
 config IMX_THERMAL
 	tristate "Temperature sensor driver for Freescale i.MX SoCs"
 	depends on ARCH_MXC || COMPILE_TEST

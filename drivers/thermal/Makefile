@@ -59,6 +59,7 @@ obj-$(CONFIG_TI_SOC_THERMAL)	+= ti-soc-thermal/
 obj-y				+= st/
 obj-y				+= qcom/
 obj-y				+= tegra/
+obj-$(CONFIG_HISI_TSENS_SMC)	+= hisi_tsens_smc.o
 obj-$(CONFIG_HISI_THERMAL)     += hisi_thermal.o
 obj-y				+= mediatek/
 obj-$(CONFIG_GENERIC_ADC_THERMAL)	+= thermal-generic-adc.o
