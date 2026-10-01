@@ -21,4 +21,13 @@ config KUNPENG_HCCS
 	  health status and port information of HCCS, or reducing system
 	  power consumption on Kunpeng SoC.
 
+config L410_DEADMAN
+	bool "Huawei L410 bring-up deadman watchdog"
+	depends on ARM64
+	help
+	  Arms the Kirin 990 AP SP805 watchdog early in boot and never pets it,
+	  so a hung or unreachable test kernel resets the machine back to the
+	  default boot entry. Only useful while bringing up new kernels on the
+	  Huawei L410; boot with l410_deadman=0 to disable.
+
 endmenu
