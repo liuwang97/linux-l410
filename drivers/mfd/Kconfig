@@ -629,6 +629,21 @@ config MFD_HI6421_PMIC
 	  menus in order to enable them.
 	  We communicate with the Hi6421 via memory-mapped I/O.
 
+config MFD_HISI_SPMI_PMIC
+	tristate "HiSilicon SPMI PMIC (Kirin 990 generation)"
+	depends on OF
+	depends on SPMI
+	depends on GPIOLIB
+	select MFD_CORE
+	select REGMAP_SPMI
+	select IRQ_DOMAIN
+	help
+	  Core driver for the SPMI PMIC used with the HiSilicon Kirin 990
+	  (e.g. Huawei Qingyun L410). The regulators, RTC and power key are
+	  described by the vendor firmware device tree as child nodes; this
+	  driver provides their register map and the PMIC interrupt
+	  controller.
+
 config MFD_HI6421_SPMI
 	tristate "HiSilicon Hi6421v600 SPMI PMU/Codec IC"
 	depends on OF
