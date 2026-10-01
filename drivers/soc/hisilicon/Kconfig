@@ -47,6 +47,17 @@ config L410_DEADMAN
 	  default boot entry. Only useful while bringing up new kernels on the
 	  Huawei L410; boot with l410_deadman=0 to disable.
 
+config KIRIN990_SUSPEND
+	bool "HiSilicon Kirin 990 system suspend"
+	depends on ARM64 && ARM_PSCI_FW && CPU_IDLE && SUSPEND
+	help
+	  Enter "deep" system suspend the way the vendor kernel does: flag
+	  the suspend in SCTRL and enter the cluster sleep state, so the
+	  firmware hands the system to LPM3.  Without this, "deep" is PSCI
+	  SYSTEM_SUSPEND, which this firmware never supported in practice.
+	  The board does not resume from it yet, so suspend-to-idle stays
+	  the default; kirin990_sr.deep=1 makes "deep" the default.
+
 config L410_PERF
 	bool "Huawei L410 performance modes and interaction boosts"
 	depends on ARM64 && CPU_FREQ && PM && INPUT && OF
