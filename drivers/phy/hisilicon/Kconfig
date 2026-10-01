@@ -33,6 +33,20 @@ config PHY_HI3670_USB
 
 	  To compile this driver as a module, choose M here.
 
+config PHY_KIRIN990_USB3
+	tristate "Kirin 990 USB 3.1 combo PHY support"
+	depends on (ARCH_HISI && ARM64) || COMPILE_TEST
+	depends on OF
+	select GENERIC_PHY
+	select MFD_SYSCON
+	select FW_LOADER
+	help
+	  Enable this to support the USB 2.0 / USB 3.1 (DP combo) PHY of the
+	  HiSilicon Kirin 990 SoC. It also sequences the resets of the DWC3
+	  controller and the Type-C Assist lane mux (host mode only).
+
+	  To compile this driver as a module, choose M here.
+
 config PHY_HI3670_PCIE
 	tristate "hi3670 PCIe PHY support"
 	depends on (ARCH_HISI && ARM64) || COMPILE_TEST
