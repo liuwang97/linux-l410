@@ -1,0 +1,26 @@
+// T4 USB: Kirin 990 DWC3 (host only) + USB 3.1/DP combo PHY + on-board
+// Realtek RTS5411 hub (USB 2.0 part 0bda:5411, USB 3 part 0bda:0411), behind
+// which sits the RTL8153 used for ssh.
+
+&{/usb_phy@f8480000} {
+	#phy-cells = <0>;
+	hisilicon,usb-dp-ctrl = <&{/hisi_usb_dp_ctrl@f8481000}>;
+	hisilicon,dwc3 = <&{/hisi_usb@f8480000/dwc3@f8400000}>;
+	hisilicon,pericrg-syscon = <&{/crgctrl@fff05000}>;
+	hisilicon,mmc0crg-syscon = <&{/mmc0crg_for_usb}>;
+	hisilicon,pctrl-syscon = <&{/pctrl@fe02e000}>;
+	hisilicon,sctrl-syscon = <&{/sysctrl@fa89b000}>;
+	hisilicon,pmctrl-syscon = <&{/pmctrl@fff01000}>;
+	hisilicon,hsdt-sctrl-syscon = <&{/hsdt_sysctrl@f8181000}>;
+};
+
+&{/hisi_usb@f8480000} {
+	phys = <&{/usb_phy@f8480000}>;
+	phy-names = "usb";
+};
+
+&{/hisi_usb@f8480000/dwc3@f8400000} {
+	dr_mode = "host";
+	/delete-property/ extcon;
+	/delete-property/ linux,sysdev_is_parent;
+};

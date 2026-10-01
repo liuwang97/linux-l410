@@ -1,0 +1,32 @@
+// T4 USB: power/reset of the on-board RTS5411 hub through onboard_usb_dev.
+// Needs gpio@fe010000 (pl061) and its pinctrl-single range. If the regulator or
+// GPIO ever defers, the onboard_usb_dev USB driver defers on the hub device too
+// and the hub gets re-configured on every deferred-probe retry.
+
+/ {
+	usb_hub_vdd: regulator-usb-hub-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-hub-vdd";
+		/* usbhub_vdd_on_gpio (legacy GPIO 115) */
+		gpio = <&{/amba/gpio@fe010000} 3 0>;
+		enable-active-high;
+		startup-delay-us = <12000>;
+	};
+};
+
+&{/hisi_usb@f8480000/dwc3@f8400000} {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/*
+	 * Root port 1 of both root hubs. The USB 3 part (0bda:0411) resolves
+	 * to this node too, so the onboard_usb_dev driver links both halves.
+	 */
+	hub@1 {
+		compatible = "usbbda,5411";
+		reg = <1>;
+		vdd-supply = <&usb_hub_vdd>;
+		/* hub_bpwr_gpio (legacy GPIO 114): high holds the hub in reset */
+		reset-gpios = <&{/amba/gpio@fe010000} 2 0>;
+	};
+};
