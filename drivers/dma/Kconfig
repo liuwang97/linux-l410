@@ -367,6 +367,17 @@ config INTEL_IOATDMA
 
 	  If unsure, say N.
 
+config HISI_DMA64
+	tristate "HiSilicon Kirin 64-bit peripheral DMA support"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on ARM64 && OF
+	select DMA_ENGINE
+	select DMA_VIRTUAL_CHANNELS
+	help
+	  Support the peripheral DMA controller of Kirin 990 SoCs
+	  ("hisilicon,hisi-dma64-1.0"), used by the UART, SPI and I2C
+	  controllers.
+
 config K3_DMA
 	tristate "Hisilicon K3 DMA support"
 	depends on ARCH_HISI || COMPILE_TEST
