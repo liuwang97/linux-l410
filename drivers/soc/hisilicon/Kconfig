@@ -47,4 +47,14 @@ config L410_DEADMAN
 	  default boot entry. Only useful while bringing up new kernels on the
 	  Huawei L410; boot with l410_deadman=0 to disable.
 
+config L410_PERF
+	bool "Huawei L410 performance modes and interaction boosts"
+	depends on ARM64 && CPU_FREQ && PM && INPUT && OF
+	help
+	  Power / balanced / performance modes for the Kirin 990 (Huawei
+	  Qingyun L410) and short CPU, GPU and memory frequency floors while
+	  the user interacts, starts an application or an animation runs
+	  (input boost, launch boost). Uses the PM QoS interfaces only, so
+	  thermal limits always win. Controlled from /sys/kernel/l410_perf/.
+
 endmenu
