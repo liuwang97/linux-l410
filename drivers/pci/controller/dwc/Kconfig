@@ -165,6 +165,19 @@ config PCIE_KIRIN
 	  Say Y here if you want PCIe controller support
 	  on HiSilicon Kirin series SoCs.
 
+config PCIE_KPORT
+	bool "HiSilicon Kirin 990 (kport) PCIe controller"
+	depends on OF && (ARM64 || COMPILE_TEST)
+	depends on PCI_MSI
+	select PCIE_DW_HOST
+	select MFD_SYSCON
+	help
+	  Say Y here to enable the two DesignWare PCIe root complexes of the
+	  HiSilicon Kirin 990 SoC, described by the vendor "pcie-kport,rc"
+	  devicetree binding (Huawei L410: RTL8168 Ethernet on RC0, Hi110x
+	  WiFi on RC1). Also provides the endpoint power/link API used by
+	  the Hi110x driver.
+
 config PCIE_HISI_STB
 	bool "HiSilicon STB PCIe controller"
 	depends on ARCH_HISI || COMPILE_TEST
