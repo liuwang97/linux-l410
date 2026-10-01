@@ -33,7 +33,8 @@ typedef struct task_struct oal_task_stru;
      (_PRE_CONFIG_TARGET_PRODUCT == _PRE_TARGET_PRODUCT_TYPE_WS835DMB))
 #define oal_sched_setscheduler(task, policy, param) sched_setscheduler_export(task, policy, param)
 #elif (_PRE_CONFIG_TARGET_PRODUCT == _PRE_TARGET_PRODUCT_TYPE_1102COMMON)
-#define oal_sched_setscheduler(task, policy, param) sched_setscheduler(task, policy, param)
+int hi110x_sched_setscheduler(struct task_struct *tsk, uint32_t policy, int32_t prio);
+#define oal_sched_setscheduler(task, policy, param) hi110x_sched_setscheduler(task, policy, (param)->sched_priority)
 #endif
 #define oal_set_user_nice(task, nice) set_user_nice(task, nice)
 

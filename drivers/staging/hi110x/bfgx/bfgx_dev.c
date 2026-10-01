@@ -3187,10 +3187,15 @@ STATIC struct of_device_id g_hi110x_ps_match_table[] = {
 #endif
 
 /*  platform_driver struct for PS module */
+static void ps_remove_void(struct platform_device *pdev)
+{
+    (void)ps_remove(pdev);
+}
+
 STATIC struct platform_driver g_ps_platform_driver = {
 #ifdef _PRE_CONFIG_USE_DTS
     .probe = ps_probe,
-    .remove = ps_remove,
+    .remove = ps_remove_void,
     .suspend = ps_suspend,
     .resume = ps_resume,
 #endif

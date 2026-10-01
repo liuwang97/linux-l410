@@ -636,28 +636,12 @@ OAL_STATIC int32_t oal_pcie_dual_pci_probe(oal_pci_dev_stru *pst_pci_dev, const 
 
 OAL_STATIC void oal_pcie_init_dma_attr(oal_pci_dev_stru *pst_pci_dev)
 {
-    const struct dma_map_ops *ops = get_dma_ops(&pst_pci_dev->dev);
-    if (ops == NULL) {
-        g_hipci_sync_flush_cache_enable = 1;
-        g_hipci_sync_inv_cache_enable   = 1;
-        oal_print_hi11xx_log(HI11XX_LOG_INFO, "pcie dma is direct");
-        return;
-    }
-
-    if (ops->sync_single_for_cpu == NULL) {
-        // smmu old driver
-        g_hipci_sync_inv_cache_enable = 0;
-        oal_pcie_set_dma_data_rx_check_flag(0); // inv func null
-    } else {
-        g_hipci_sync_inv_cache_enable = 1;
-    }
-
-    if (ops->sync_single_for_device == NULL) {
-        // smmu old driver
-        g_hipci_sync_flush_cache_enable = 0;
-    } else {
-        g_hipci_sync_flush_cache_enable = 1;
-    }
+    /*
+     * dma_sync_single_for_{cpu,device}() always do the right thing on current
+     * kernels (no-ops for coherent/direct mappings), so keep both enabled.
+     */
+    g_hipci_sync_flush_cache_enable = 1;
+    g_hipci_sync_inv_cache_enable   = 1;
 
     oal_print_hi11xx_log(HI11XX_LOG_INFO, "pci dma sync flush cache is %s, inv cache is %s",
                          g_hipci_sync_flush_cache_enable == 0 ? "disable" : "enable",

@@ -290,18 +290,6 @@ STATIC int hci_bt_bdaddr(struct hci_dev *hdev)
     return 0;
 }
 
-STATIC int hci_bt_init(struct hci_dev *hdev)
-{
-    int ret;
-    PS_PRINT_FUNCTION_NAME;
-    set_bit(HCI_RUNNING, &hdev->flags);
-    atomic_set(&hdev->cmd_cnt, 1);
-    set_bit(HCI_INIT, &hdev->flags);
-
-    ret = hci_bt_bdaddr(hdev);
-    return ret;
-}
-
 /* Initialize device */
 STATIC int hci_bt_open(struct hci_dev *hdev)
 {
@@ -323,10 +311,7 @@ STATIC int hci_bt_open(struct hci_dev *hdev)
 
     mutex_unlock(&(pm_top_data->host_mutex));
 
-    if (ret == 0) {
-        ret = hci_bt_init(hdev);
-    }
-
+    /* the BD address is programmed from ->setup(), once the HCI core can send commands */
     return ret;
 }
 
@@ -343,9 +328,6 @@ STATIC int hci_bt_close(struct hci_dev *hdev)
     }
 
     ps_print_info("hci_bt_close\n");
-
-    // hci_uart_flush(hdev)
-    hdev->flush = NULL;
 
     /* bt power off */
     mutex_lock(&(pm_top_data->host_mutex));
@@ -509,7 +491,8 @@ STATIC int hci_bt_flush(struct hci_dev *hdev)
 STATIC int hci_bt_setup(struct hci_dev *hdev)
 {
     ps_print_info("hci_bt_setup\n");
-    return 0;
+    /* program the BD address stored in the board EEPROM (MACBT) */
+    return hci_bt_bdaddr(hdev);
 }
 
 
@@ -594,15 +577,20 @@ STATIC int bt_register_hci_dev(struct pm_drv_data *pm_data)
     hdev->flush = hci_bt_flush;
     hdev->send  = hci_bt_send_frame;
     hdev->setup = hci_bt_setup;
+    {
+        struct ps_plat_s *ps_plat_d = NULL;
 
-    err = hci_register_dev(hdev);
-    if (err < 0) {
-        ps_print_err("can't register hisi HCI device, err=%d\n", err);
-        hci_free_dev(hdev);
-        return -ENODEV;
+        if ((ps_get_plat_reference(&ps_plat_d) == SUCCESS) && (ps_plat_d != NULL) &&
+            (ps_plat_d->pm_pdev != NULL)) {
+            SET_HCIDEV_DEV(hdev, &ps_plat_d->pm_pdev->dev);
+        }
     }
 
-    /* create recv thread */
+    /*
+     * The HCI core may open the device (and receive events) as soon as it is
+     * registered, so the receive path must be ready first.
+     */
+    pm_data->st_bt_dev.hdev = hdev;
     pm_data->st_bt_dev.bt_recv_task = oal_thread_create(hci_bt_recv_thread,
                                                         (void *)pm_data,
                                                         NULL,
@@ -610,16 +598,42 @@ STATIC int bt_register_hci_dev(struct pm_drv_data *pm_data)
                                                         SCHED_FIFO,
                                                         0,
                                                         -1);
-    if (IS_ERR(pm_data->st_bt_dev.bt_recv_task)) {
-        ps_print_err("create hci_recv thread failed, err=%p\n", pm_data->st_bt_dev.bt_recv_task);
-        hci_unregister_dev(hdev);
+    if (oal_is_err_or_null(pm_data->st_bt_dev.bt_recv_task)) {
+        ps_print_err("create hci_recv thread failed\n");
+        pm_data->st_bt_dev.bt_recv_task = NULL;
+        pm_data->st_bt_dev.hdev = NULL;
         hci_free_dev(hdev);
         return -ENOMEM;
     }
 
-    pm_data->st_bt_dev.hdev = hdev;
+    err = hci_register_dev(hdev);
+    if (err < 0) {
+        ps_print_err("can't register hisi HCI device, err=%d\n", err);
+        oal_thread_stop(pm_data->st_bt_dev.bt_recv_task, NULL);
+        pm_data->st_bt_dev.bt_recv_task = NULL;
+        pm_data->st_bt_dev.hdev = NULL;
+        hci_free_dev(hdev);
+        return -ENODEV;
+    }
 
     return 0;
+}
+
+/* register hci0 once the platform is up (the vendor used "hciattach /dev/hwbt hisi") */
+int32_t hi110x_bluez_register(void)
+{
+    int32_t ret;
+    struct pm_drv_data *pm_data = pm_get_drvdata(BUART);
+    struct pm_top *pm_top_data = pm_get_top();
+
+    if ((pm_data == NULL) || (pm_top_data == NULL)) {
+        ps_print_err("bfgx not initialised, no hci device\n");
+        return -ENODEV;
+    }
+    mutex_lock(&(pm_top_data->host_mutex));
+    ret = (pm_data->st_bt_dev.hdev != NULL) ? 0 : bt_register_hci_dev(pm_data);
+    mutex_unlock(&(pm_top_data->host_mutex));
+    return ret;
 }
 
 STATIC void bt_unregister_hci_dev(struct pm_drv_data *pm_data)
@@ -633,13 +647,14 @@ STATIC void bt_unregister_hci_dev(struct pm_drv_data *pm_data)
 
     hdev = pm_data->st_bt_dev.hdev;
 
-    if (!IS_ERR(pm_data->st_bt_dev.bt_recv_task)) {
+    hci_unregister_dev(hdev);
+
+    if (!oal_is_err_or_null(pm_data->st_bt_dev.bt_recv_task)) {
         oal_thread_stop(pm_data->st_bt_dev.bt_recv_task, NULL);
         pm_data->st_bt_dev.bt_recv_task = NULL;
     }
 
     pm_data->st_bt_dev.hdev = NULL;
-    hci_unregister_dev(hdev);
 
     hci_free_dev(hdev);
 

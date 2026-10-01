@@ -3431,10 +3431,10 @@ OAL_STATIC uint32_t wal_hipriv_register_netdev(oal_net_device_stru *net_dev, mac
     }
 
     if (p2p_mode == WLAN_P2P_DEV_MODE) {
-        oal_set_mac_addr((uint8_t *)oal_netdevice_mac_addr(net_dev), mac_mib_get_p2p0_dot11StationID(mac_vap));
+        oal_netdev_set_mac(net_dev, mac_mib_get_p2p0_dot11StationID(mac_vap));
         mac_device->st_p2p_info.uc_p2p0_vap_idx = mac_vap->uc_vap_id;
     } else {
-        oal_set_mac_addr((uint8_t *)oal_netdevice_mac_addr(net_dev), mac_mib_get_StationID(mac_vap));
+        oal_netdev_set_mac(net_dev, mac_mib_get_StationID(mac_vap));
     }
 
     /* 注册net_device */
@@ -6746,7 +6746,7 @@ OAL_STATIC int32_t wal_set_mac_addr(oal_net_device_stru *net_dev)
         case NL80211_IFTYPE_P2P_DEVICE: {
             /* 产生P2P device MAC 地址，将本地mac 地址bit 设置为1 */
             auc_primary_mac_addr[0] |= 0x02;
-            oal_set_mac_addr((uint8_t *)oal_netdevice_mac_addr(net_dev), auc_primary_mac_addr);
+            oal_netdev_set_mac(net_dev, auc_primary_mac_addr);
             break;
         }
         default: {
@@ -6763,7 +6763,7 @@ OAL_STATIC int32_t wal_set_mac_addr(oal_net_device_stru *net_dev)
                 auc_primary_mac_addr[2] = 0x02; // 0x02代表mac地址第三个数值
 #endif /* #ifdef _PRE_PLAT_FEATURE_CUSTOMIZE */
             }
-            oal_set_mac_addr((uint8_t *)oal_netdevice_mac_addr(net_dev), auc_primary_mac_addr);
+            oal_netdev_set_mac(net_dev, auc_primary_mac_addr);
             break;
         }
     }
@@ -6827,7 +6827,7 @@ static void wal_set_chba_mac_addr(oal_net_device_stru *net_dev)
     primary_mac_addr[BYTE_OFFSET_0] &= (~0x02);
     primary_mac_addr[BYTE_OFFSET_1] = 0x11;
     primary_mac_addr[BYTE_OFFSET_2] = 0x05;
-    oal_set_mac_addr((uint8_t *)oal_netdevice_mac_addr(net_dev), primary_mac_addr);
+    oal_netdev_set_mac(net_dev, primary_mac_addr);
 }
 
 static void wal_chba_netdev_set(oal_net_device_stru *net_dev, oal_wireless_dev_stru *wdev, oal_wiphy_stru *wiphy)

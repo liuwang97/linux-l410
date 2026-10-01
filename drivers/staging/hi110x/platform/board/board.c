@@ -309,61 +309,57 @@ static int32_t set_board_pmu_clk32k(struct platform_device *pdev)
 
     dev = &pdev->dev;
     clk_name = g_st_board_info.clk_32k_name;
-    clk = devm_clk_get(dev, clk_name);
-    if (clk == NULL) {
-        ps_print_err("Get 32k clk %s failed!!!\n", clk_name);
-        chr_exception_report(CHR_PLATFORM_EXCEPTION_EVENTID, CHR_SYSTEM_PLAT, CHR_LAYER_DRV,
-                             CHR_PLT_DRV_EVENT_DTS, CHR_PLAT_DRV_ERROR_32K_CLK_DTS);
-        return BOARD_FAIL;
+    /*
+     * The L410 DT fixup adds clocks/clock-names for this. If no clock provider
+     * for the PMIC 32k gate is present, go on without it: the firmware leaves
+     * the chip's sleep clock running.
+     */
+    clk = devm_clk_get_optional(dev, clk_name);
+    if (IS_ERR(clk)) {
+        ps_print_err("Get 32k clk %s failed (%ld), continuing without it\n", clk_name, PTR_ERR(clk));
+        clk = NULL;
     }
     g_st_board_info.clk_32k = clk;
 #endif
     return BOARD_SUCC;
 }
+
+static bool g_clk_32k_on;
+
 int32_t enable_board_pmu_clk32k(void)
 {
 #ifdef _PRE_CONFIG_USE_DTS
     int32_t ret;
-    struct clk *clk = NULL;
+    struct clk *clk = g_st_board_info.clk_32k;
 
-    clk = g_st_board_info.clk_32k;
-
-    if (clk != NULL) {
-        if (!__clk_is_enabled(clk)) {
-            ret = clk_prepare_enable(clk);
-            if (unlikely(ret < 0)) {
-                ps_print_err("enable 32K clk failed!!!\n");
-                chr_exception_report(CHR_PLATFORM_EXCEPTION_EVENTID, CHR_SYSTEM_PLAT, CHR_LAYER_DRV,
-                    CHR_PLT_DRV_EVENT_CLK, CHR_PLAT_DRV_ERROR_32K_CLK_EN);
-                return BOARD_FAIL;
-            }
-        }
-        ps_print_info("enable 32K clk success!\n");
+    if (clk == NULL) {
         return BOARD_SUCC;
-    } else {
-        ps_print_err("clk32k not config!\n");
-        return BOARD_FAIL;
     }
+    if (!g_clk_32k_on) {
+        ret = clk_prepare_enable(clk);
+        if (unlikely(ret < 0)) {
+            ps_print_err("enable 32K clk failed!!!\n");
+            return BOARD_FAIL;
+        }
+        g_clk_32k_on = true;
+    }
+    ps_print_info("enable 32K clk success!\n");
 #endif
     return BOARD_SUCC;
 }
 int32_t disable_board_pmu_clk32k(void)
 {
 #ifdef _PRE_CONFIG_USE_DTS
-    struct clk *clk = NULL;
+    struct clk *clk = g_st_board_info.clk_32k;
 
-    clk = g_st_board_info.clk_32k;
-
-    if (clk != NULL) {
-        if (__clk_is_enabled(clk)) {
-            clk_disable_unprepare(clk);
-        }
-        ps_print_info("disable 32K clk success!\n");
+    if (clk == NULL) {
         return BOARD_SUCC;
-    } else {
-        ps_print_err("clk32k not config!\n");
-        return BOARD_FAIL;
     }
+    if (g_clk_32k_on) {
+        clk_disable_unprepare(clk);
+        g_clk_32k_on = false;
+    }
+    ps_print_info("disable 32K clk success!\n");
 #endif
     return BOARD_SUCC;
 }
@@ -1328,9 +1324,14 @@ static const struct acpi_device_id g_hi110x_board_acpi_match[] = {
 };
 #endif
 
+static void hi110x_board_remove_void(struct platform_device *pdev)
+{
+    (void)hi110x_board_remove(pdev);
+}
+
 STATIC struct platform_driver g_hi110x_board_driver = {
     .probe = hi110x_board_probe,
-    .remove = hi110x_board_remove,
+    .remove = hi110x_board_remove_void,
     .suspend = hi110x_board_suspend,
     .resume = hi110x_board_resume,
     .driver = {

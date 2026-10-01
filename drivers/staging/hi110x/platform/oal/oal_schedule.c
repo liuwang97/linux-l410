@@ -80,7 +80,7 @@ int32_t oal_print_all_wakelock_buff(char *buf, int32_t buf_len)
         oal_wakelock_stru *pst_wakelock = (oal_wakelock_stru *)oal_dlist_get_entry(pst_entry, oal_wakelock_stru, list);
         if (buf_len > ret) {
             ret = snprintf_s(buf + count, buf_len - count, buf_len - count - 1, "%s     %lu  %d  %s %pf\n",
-                             pst_wakelock->st_wakelock.name,
+                             pst_wakelock->name,
                              pst_wakelock->lock_count,
                              oal_wakelock_active(pst_wakelock),
                              pst_wakelock->debug ? "on " : "off",
@@ -126,9 +126,9 @@ int32_t oal_set_wakelock_debuglevel(const char *name, uint32_t level)
     {
         oal_wakelock_stru *pst_wakelock = (oal_wakelock_stru *)oal_dlist_get_entry(pst_entry, oal_wakelock_stru, list);
 
-        if (!oal_strcmp(name, pst_wakelock->st_wakelock.name)) {
+        if (!oal_strcmp(name, pst_wakelock->name)) {
             oal_io_print("set wakelock %s debuglevel from %u to %u\n",
-                         pst_wakelock->st_wakelock.name, pst_wakelock->debug, level);
+                         pst_wakelock->name, pst_wakelock->debug, level);
             pst_wakelock->debug = level;
             return OAL_SUCC;
         }

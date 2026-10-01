@@ -327,7 +327,7 @@ OAL_STATIC OAL_INLINE oal_file_stru *oal_file_write(oal_file_stru *file, char *p
 
     fs = get_fs();
     set_fs(KERNEL_DS);
-    i_ret = file->f_op->write(file, pc_string, ul_length, &file->f_pos);
+    i_ret = kernel_write(file, pc_string, ul_length, &file->f_pos);
     set_fs(fs);
 
     return file;
@@ -685,7 +685,8 @@ OAL_STATIC OAL_INLINE void oal_mdelay(oal_uint u_loops)
  */
 OAL_STATIC OAL_INLINE uint32_t oal_kallsyms_lookup_name(const uint8_t *uc_var_name)
 {
-    return kallsyms_lookup_name(uc_var_name);
+    /* kallsyms_lookup_name() is not exported any more; SDT global-var peeking is unsupported */
+    return 0;
 }
 
 /*

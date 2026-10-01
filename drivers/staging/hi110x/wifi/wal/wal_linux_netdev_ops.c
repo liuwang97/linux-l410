@@ -791,7 +791,7 @@ OAL_STATIC int32_t _wal_netdev_set_mac_addr(oal_net_device_stru *net_dev, oal_so
         return -OAL_EINVAL;
     }
 
-    oal_set_mac_addr ((uint8_t *)(net_dev->dev_addr), (uint8_t *)(mac_addr->sa_data));
+    oal_netdev_set_mac(net_dev, (uint8_t *)(mac_addr->sa_data));
 
     wdev = (oal_wireless_dev_stru *)net_dev->ieee80211_ptr;
     if (wdev == NULL) {

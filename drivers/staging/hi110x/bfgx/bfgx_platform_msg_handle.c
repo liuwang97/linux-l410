@@ -314,39 +314,19 @@ STATIC void gnss_trickle_request_sleep(struct ps_core_s *ps_core_d, uint8_t *buf
 
 STATIC void heartbeat_debug_print(struct ps_core_s *ps_core_d, uint8_t syschar)
 {
-    struct tty_struct *tty = NULL;
-    struct uart_state *state = NULL;
     struct pm_drv_data *pm_data = NULL;
-    struct serial_icounter_struct uart_icount;
 
     // 商用版本不打印
     if (hi110x_get_release_type() == HI110X_VTYPE_RELEASE) {
         return;
     }
 
-    tty = ps_core_d->tty;
-    state = tty->driver_data;
     pm_data = ps_core_d->pm_data;
-#ifdef _PRE_PRODUCT_HI3751V811
-    if (state->uart_port == NULL) {
-        return;
-    }
-#endif
-    if (tty->ops->get_icount(tty, &uart_icount) < 0) {
-        memset_s(&uart_icount, sizeof(struct serial_icounter_struct),
-                 0, sizeof(struct serial_icounter_struct));
-    }
 
-    ps_print_info("%ds,tty_tx=%d,tty_rx=%d,uart_tx=%d,uart_rx=%d,cts=%d, stopped=%d, hw_stopped=%d, chars_in_tty=%d\n",
+    ps_print_info("%ds,tty_tx=%d,tty_rx=%d\n",
                   syschar - SYS_INF_HEARTBEAT_CMD_BASE - 1,
                   oal_atomic_read(&(ps_core_d->tty_tx_cnt)),
-                  oal_atomic_read(&(ps_core_d->tty_rx_cnt)),
-                  uart_icount.tx,
-                  uart_icount.rx,
-                  uart_icount.cts,
-                  tty->stopped,
-                  state->uart_port->hw_stopped,
-                  tty_chars_in_buffer(tty));
+                  oal_atomic_read(&(ps_core_d->tty_rx_cnt)));
     ps_print_info("[%s]pkt_rx:BT=%lu,GNSS=%lu,FM=%lu,IR=%lu,SYS_MSG=%lu,OML=%lu,timer=%d,mod_cnt=%d,sleep_flag=%d\n",
                   index2name(pm_data->index),
                   ps_core_d->bfgx_info[BFGX_BT].rx_pkt_num,

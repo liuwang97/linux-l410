@@ -8,6 +8,7 @@
 #include "oal_schedule.h"
 #include <linux/kernel.h>
 #include <linux/types.h>
+#include <linux/serdev.h>
 #include "oal_workqueue.h"
 #include "plat_type.h"
 
@@ -294,7 +295,7 @@ struct st_bfgx_data {
 struct ps_core_s {
     void *ps_plat;
     struct pm_drv_data *pm_data;;
-    struct tty_struct *tty;
+    struct serdev_device *tty; /* BUART serdev while the port is open, else NULL */
     struct st_bfgx_data bfgx_info[BFGX_BUTT];
     /* queue head define for all sk_buff */
     oal_netbuf_head_stru tx_high_seq;

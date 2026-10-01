@@ -103,7 +103,6 @@ STATIC void print_uart_decode_param(struct ps_core_s *ps_core_d)
 int32_t ps_write_tty(struct ps_core_s *ps_core_d, const uint8_t *data, int32_t count)
 {
     int32_t tty_write_cnt;
-    struct tty_struct *tty = NULL;
 
     PS_PRINT_FUNCTION_NAME;
 
@@ -112,8 +111,7 @@ int32_t ps_write_tty(struct ps_core_s *ps_core_d, const uint8_t *data, int32_t c
         return -EINVAL;
     }
 
-    tty = ps_core_d->tty;
-    tty_write_cnt = tty->ops->write(tty, data, count);
+    tty_write_cnt = serdev_device_write_buf(ps_core_d->tty, data, count);
     if (tty_write_cnt > 0) {
         ps_tty_tx_cnt_add(ps_core_d, tty_write_cnt);
     }
@@ -1439,10 +1437,7 @@ STATIC int32_t ps_core_tx_attemper(struct ps_core_s *ps_core_d)
             break;
         }
 
-        if ((ps_core_d->tty != NULL)) {
-            /* enable wake-up from TTY */
-            set_bit(TTY_DO_WRITE_WAKEUP, &ps_core_d->tty->flags);
-        }
+        /* serdev always reports write_wakeup */
         /* tx skb data to uart driver until the skb is NULL */
         if (skb->len) {
             ps_print_dbg("use tty start to send data,skb->len=[%d]\n", skb->len);

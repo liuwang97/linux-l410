@@ -947,12 +947,12 @@ static void bfg_wake_lock(struct pm_drv_data *pm_data)
 
     oal_spin_lock_irq_save(&pst_bfg_wake_lock->lock, &flags);
     if (oal_wakelock_active(pst_bfg_wake_lock) == 0) {
-        __pm_stay_awake(&pst_bfg_wake_lock->st_wakelock);
+        __pm_stay_awake(pst_bfg_wake_lock->st_wakelock);
         pst_bfg_wake_lock->locked_addr = (uintptr_t)_RET_IP_;
         pst_bfg_wake_lock->lock_count++;
         if (oal_unlikely(pst_bfg_wake_lock->debug)) {
             printk(KERN_INFO "wakelock[%s] lockcnt:%lu <==%pf\n",
-                   pst_bfg_wake_lock->st_wakelock.name, pst_bfg_wake_lock->lock_count, (void *)_RET_IP_);
+                   pst_bfg_wake_lock->name, pst_bfg_wake_lock->lock_count, (void *)_RET_IP_);
         }
 
         gps_ilde_sleep_vote(1);
@@ -982,11 +982,11 @@ static void bfg_wake_unlock(struct pm_drv_data *pm_data)
 
     if (oal_wakelock_active(pst_bfg_wake_lock)) {
         pst_bfg_wake_lock->lock_count--;
-        __pm_relax(&pst_bfg_wake_lock->st_wakelock);
+        __pm_relax(pst_bfg_wake_lock->st_wakelock);
         pst_bfg_wake_lock->locked_addr = 0UL;
 
         if (oal_unlikely(pst_bfg_wake_lock->debug)) {
-            printk(KERN_INFO "wakeunlock[%s] lockcnt:%lu <==%pf\n", pst_bfg_wake_lock->st_wakelock.name,
+            printk(KERN_INFO "wakeunlock[%s] lockcnt:%lu <==%pf\n", pst_bfg_wake_lock->name,
                    pst_bfg_wake_lock->lock_count, (void *)_RET_IP_);
         }
 
@@ -1032,10 +1032,6 @@ static int32_t process_host_wkup_dev_fail(struct ps_core_s *ps_core_d, struct pm
 {
     unsigned long flags;
     int bwkup_gpio_val;
-
-    if (!oal_is_err_or_null(ps_core_d->tty) && tty_chars_in_buffer(ps_core_d->tty)) {
-        ps_print_info("tty tx buf is not empty\n");
-    }
 
     bwkup_gpio_val = oal_gpio_get_value(pm_data->wakeup_host_gpio);
     ps_print_info("[%s]bfg still NOT wkup, gpio level:%d\n", index2name(pm_data->index), bwkup_gpio_val);
@@ -1203,7 +1199,7 @@ STATIC void host_wkup_dev_work(oal_work_stru *work)
      * B should not do actual wkup operation.
      */
     if (bfgx_dev_state_get(pm_data) == BFGX_ACTIVE) {
-        if (waitqueue_active(&pm_data->host_wkup_dev_comp.wait)) {
+        if (swait_active(&pm_data->host_wkup_dev_comp.wait)) {
             ps_print_info("it seems like dev ack with NoSleep\n");
         } else { /* 目前用了一把host_mutex大锁，这种case不应存在，但低功耗模块不应依赖外部 */
             ps_print_info("B do wkup_dev work item after A do it but not finished\n");
@@ -1217,34 +1213,12 @@ STATIC void host_wkup_dev_work(oal_work_stru *work)
 
 static int32_t bfg_wait_tty_resume(struct ps_core_s *ps_core_d)
 {
-#define MAX_TTYRESUME_LOOPCNT 300
-
-#ifdef ASYNCB_SUSPENDED
-    uint32_t loop_tty_resume_cnt = 0;
-#endif
-
-    if ((ps_core_d->tty) && (ps_core_d->tty->port)) {
-#if ((LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)) && (_PRE_OS_VERSION_LINUX == _PRE_OS_VERSION))
-        while (tty_port_suspended(ps_core_d->tty->port)) {
-            if (loop_tty_resume_cnt++ >= MAX_TTYRESUME_LOOPCNT) {
-                ps_print_err("tty is not ready, state:%d!\n", tty_port_suspended(ps_core_d->tty->port));
-                return OAL_FALSE;
-            }
-            oal_msleep(SLEEP_10_MSEC);
-        }
-        ps_print_info("tty state:0x%x,loop_cnt:%d\n", tty_port_suspended(ps_core_d->tty->port), loop_tty_resume_cnt);
-#else
-        ps_print_info("tty port flag 0x%x\n", (unsigned int)ps_core_d->tty->port->flags);
-#ifdef ASYNCB_SUSPENDED
-        while (test_bit(ASYNCB_SUSPENDED, (volatile unsigned long *)&(ps_core_d->tty->port->flags))) {
-            if (loop_tty_resume_cnt++ >= MAX_TTYRESUME_LOOPCNT) {
-                ps_print_err("tty is not ready, flag is 0x%x!\n", (unsigned int)ps_core_d->tty->port->flags);
-                return OAL_FALSE;
-            }
-            oal_msleep(SLEEP_10_MSEC);
-        }
-#endif
-#endif
+    /*
+     * The BUART is a serdev child of the UART port device, so the driver core
+     * resumes the port before us; there is no port state to poll any more.
+     */
+    if (ps_core_d->tty) {
+        return OAL_TRUE;
     } else {
         ps_print_err("tty has not inited\n");
         return OAL_FALSE;

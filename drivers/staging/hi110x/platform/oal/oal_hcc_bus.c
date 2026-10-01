@@ -2006,7 +2006,7 @@ void hcc_bus_wakelocks_release_detect(hcc_bus *pst_bus)
     if (hcc_bus_wakelock_active(pst_bus)) {
 #if ((KERNEL_VERSION(2, 6, 37) <= LINUX_VERSION_CODE) && (_PRE_OS_VERSION_LINUX == _PRE_OS_VERSION))
         oal_print_hi11xx_log(HI11XX_LOG_INFO, "[E]We still hold %s   %lu wake locks, Now release all",
-                             pst_bus->st_bus_wakelock.st_wakelock.name,
+                             pst_bus->st_bus_wakelock.name,
                              pst_bus->st_bus_wakelock.lock_count);
 #endif
         declare_dft_trace_key_info("wlan_wakelock_error_hold", OAL_DFT_TRACE_EXCEP);
@@ -2105,7 +2105,7 @@ OAL_STATIC void hcc_bus_resource_free(hcc_bus *pst_bus)
     }
     mutex_destroy(&pst_bus->rx_transfer_lock);
 #if ((KERNEL_VERSION(2, 6, 37) <= LINUX_VERSION_CODE) && (_PRE_OS_VERSION_LINUX == _PRE_OS_VERSION))
-    name = (char *)pst_bus->st_bus_wakelock.st_wakelock.name;
+    name = (char *)pst_bus->st_bus_wakelock.name;
 #endif
     oal_wake_lock_exit(&pst_bus->st_bus_wakelock);
 
@@ -2544,6 +2544,27 @@ uint32_t hcc_get_max_trans_size(struct hcc_handler *hcc)
 }
 
 /*
+ * sched_setscheduler() is no longer exported: map the vendor policies onto
+ * sched_set_fifo()/sched_set_fifo_low()/sched_set_normal().
+ */
+int hi110x_sched_setscheduler(struct task_struct *tsk, uint32_t policy, int32_t prio)
+{
+    if (policy == SCHED_FIFO || policy == SCHED_RR) {
+        if (prio >= MAX_RT_PRIO / 2) {
+            sched_set_fifo(tsk);
+        } else {
+            sched_set_fifo_low(tsk);
+        }
+        return 0;
+    }
+    if (policy != SCHED_NORMAL) {
+        return -EINVAL;
+    }
+    sched_set_normal(tsk, 0);
+    return 0;
+}
+
+/*
  * Prototype    :oal_thread_create
  * Description  : create thread
  */
@@ -2558,7 +2579,6 @@ struct task_struct* oal_thread_create(int (*threadfn)(void* data),
 #if (_PRE_OS_VERSION_LINUX == _PRE_OS_VERSION)
     int ret;
     struct task_struct *tsk = NULL;
-    struct sched_param param;
 
     /* create thread for gpio rx data in interrupt handler */
     if (sema_sync != NULL) {
@@ -2572,8 +2592,7 @@ struct task_struct* oal_thread_create(int (*threadfn)(void* data),
     }
 
     /* set thread priority and schedule policy */
-    param.sched_priority = prio;
-    ret = sched_setscheduler(tsk, policy, &param);
+    ret = hi110x_sched_setscheduler(tsk, policy, prio);
     if (oal_unlikely(ret)) {
         oal_print_hi11xx_log(HI11XX_LOG_ERR, "%s sched_setscheduler failed! ret =%d, prio=%d", namefmt, ret, prio);
     }
@@ -2629,7 +2648,7 @@ void oal_set_thread_property(struct task_struct *p, int policy,
 
     oal_print_hi11xx_log(HI11XX_LOG_INFO, "set thread scheduler policy %d", policy);
 
-    if (sched_setscheduler(p, policy, (struct sched_param *)param)) {
+    if (hi110x_sched_setscheduler(p, policy, param->sched_priority)) {
         oal_print_hi11xx_log(HI11XX_LOG_ERR, "[Error]set scheduler failed! %d", policy);
     }
 

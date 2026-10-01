@@ -714,8 +714,8 @@ uint32_t oal_cfg80211_roamed(oal_net_device_stru *pst_net_device,
 {
 #if (KERNEL_VERSION(4, 12, 0) <= LINUX_VERSION_CODE)
     struct cfg80211_roam_info info = {0};
-    info.channel = pst_channel;
-    info.bssid = puc_bssid;
+    info.links[0].channel = pst_channel;
+    info.links[0].bssid = puc_bssid;
     info.req_ie = puc_req_ie;
     info.req_ie_len = ul_req_ie_len;
     info.resp_ie = puc_resp_ie;
@@ -1072,8 +1072,7 @@ int oal_cfg80211_external_auth_request(oal_net_device_stru *pst_netdev,
 void oal_cfg80211_ch_switch_notify(oal_net_device_stru *pst_netdev,
                                    oal_cfg80211_chan_def *pst_chandef)
 {
-    cfg80211_ch_switch_notify(pst_netdev,
-                              pst_chandef);
+    cfg80211_ch_switch_notify(pst_netdev, pst_chandef, 0);
 }
 
 /*

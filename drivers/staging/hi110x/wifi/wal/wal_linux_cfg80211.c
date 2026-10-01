@@ -2047,18 +2047,18 @@ OAL_STATIC wlan_channel_bandwidth_enum_uint8 wal_cfg80211_set_channel_cal_bw(oal
 
     p_mac_vap = oal_net_dev_priv(netdev);
 
-    p_chan_stru = netdev->ieee80211_ptr->preset_chandef.chan;
+    p_chan_stru = netdev->ieee80211_ptr->u.ap.preset_chandef.chan;
     channel     = p_chan_stru->hw_value;
 
     /* 进行内核带宽值和WITP 带宽值转换 */
-    channel_center_freq0 = oal_ieee80211_frequency_to_channel(netdev->ieee80211_ptr->preset_chandef.center_freq1);
-    channel_center_freq1 = oal_ieee80211_frequency_to_channel(netdev->ieee80211_ptr->preset_chandef.center_freq2);
-    bandwidth_value = wal_cfg80211_convert_width_to_value(netdev->ieee80211_ptr->preset_chandef.width);
+    channel_center_freq0 = oal_ieee80211_frequency_to_channel(netdev->ieee80211_ptr->u.ap.preset_chandef.center_freq1);
+    channel_center_freq1 = oal_ieee80211_frequency_to_channel(netdev->ieee80211_ptr->u.ap.preset_chandef.center_freq2);
+    bandwidth_value = wal_cfg80211_convert_width_to_value(netdev->ieee80211_ptr->u.ap.preset_chandef.width);
     vht_width = wal_cfg80211_convert_value_to_vht_width(bandwidth_value);
 
     if (bandwidth_value == 0) {
         oam_error_log1(0, 0, "{wal_cfg80211_cal_bw::chan width invalid, bandwidth=%d",
-            netdev->ieee80211_ptr->preset_chandef.width);
+            netdev->ieee80211_ptr->u.ap.preset_chandef.width);
         return -OAL_EINVAL;
     }
 
@@ -2147,14 +2147,14 @@ OAL_STATIC int32_t wal_cfg80211_set_channel_info(oal_wiphy_stru *pst_wiphy,
     int32_t l_ret;
     mac_vap_stru *pst_mac_vap = oal_net_dev_priv(pst_netdev);
     uint8_t uc_vap_id;
-    int32_t l_bandwidth = pst_netdev->ieee80211_ptr->preset_chandef.width;
+    int32_t l_bandwidth = pst_netdev->ieee80211_ptr->u.ap.preset_chandef.width;
 
     /* 获取vap id */
     uc_vap_id = pst_mac_vap->uc_vap_id;
 
-    l_center_freq1 = pst_netdev->ieee80211_ptr->preset_chandef.center_freq1;
-    l_center_freq2 = pst_netdev->ieee80211_ptr->preset_chandef.center_freq2;
-    pst_channel = pst_netdev->ieee80211_ptr->preset_chandef.chan;
+    l_center_freq1 = pst_netdev->ieee80211_ptr->u.ap.preset_chandef.center_freq1;
+    l_center_freq2 = pst_netdev->ieee80211_ptr->u.ap.preset_chandef.center_freq2;
+    pst_channel = pst_netdev->ieee80211_ptr->u.ap.preset_chandef.chan;
     l_channel = pst_channel->hw_value;
 
     oam_warning_log4(uc_vap_id, OAM_SF_ANY, "{wal_cfg80211_set_channel_info::\
@@ -3290,9 +3290,9 @@ OAL_STATIC void wal_cfg80211_add_p2p_interface_init(oal_net_device_stru *pst_net
         }
     }
 
-    oal_set_mac_addr((uint8_t *)oal_netdevice_mac_addr(pst_net_dev), auc_primary_mac_addr);
-    pst_net_dev->dev_addr[MAC_ADDR_0] |= 0x02;
-    pst_net_dev->dev_addr[MAC_ADDR_4] ^= 0x80;
+    auc_primary_mac_addr[MAC_ADDR_0] |= 0x02;
+    auc_primary_mac_addr[MAC_ADDR_4] ^= 0x80;
+    oal_netdev_set_mac(pst_net_dev, auc_primary_mac_addr);
 }
 
 OAL_STATIC void wal_cfg80211_add_virtual_intf_netdev_init(oal_net_device_stru *pst_net_dev,
@@ -3553,7 +3553,7 @@ OAL_STATIC uint32_t wal_cfg80211_infomation_proc_func(oal_net_device_stru *net_d
         wal_cfg80211_exception_handle(wdev, net_dev);
         return OAL_FAIL;
     }
-    oal_set_mac_addr((uint8_t *)oal_netdevice_mac_addr(net_dev), mac_mib_get_StationID(mac_vap));
+    oal_netdev_set_mac(net_dev, mac_mib_get_StationID(mac_vap));
 
     /* 设置VAP UP */
     wal_netdev_open(net_dev, OAL_FALSE);
@@ -4940,19 +4940,83 @@ OAL_STATIC int32_t wal_cfg80211_external_auth(oal_wiphy_stru *pst_wiphy, oal_net
 #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) */
 
 /* 不同操作系统函数指针结构体方式不同 */
+/*
+ * Adapters from the current cfg80211_ops prototypes (MLO link ids, radio index,
+ * cfg80211_ap_update, mgmt frame registration bitmaps) to the vendor handlers.
+ * The chip has a single link, so link_id is always 0 / ignored.
+ */
+static int wal_cfg80211_add_key_ops(struct wiphy *wiphy, struct net_device *dev, int link_id,
+    u8 key_index, bool pairwise, const u8 *mac_addr, struct key_params *params)
+{
+    return wal_cfg80211_add_key(wiphy, dev, key_index, pairwise, mac_addr, params);
+}
+
+static int wal_cfg80211_get_key_ops(struct wiphy *wiphy, struct net_device *dev, int link_id,
+    u8 key_index, bool pairwise, const u8 *mac_addr, void *cookie,
+    void (*callback)(void *cookie, struct key_params *))
+{
+    return wal_cfg80211_get_key(wiphy, dev, key_index, pairwise, mac_addr, cookie, callback);
+}
+
+static int wal_cfg80211_del_key_ops(struct wiphy *wiphy, struct net_device *dev, int link_id,
+    u8 key_index, bool pairwise, const u8 *mac_addr)
+{
+    return wal_cfg80211_remove_key(wiphy, dev, key_index, pairwise, mac_addr);
+}
+
+static int wal_cfg80211_set_default_key_ops(struct wiphy *wiphy, struct net_device *dev, int link_id,
+    u8 key_index, bool unicast, bool multicast)
+{
+    return wal_cfg80211_set_default_key(wiphy, dev, key_index, unicast, multicast);
+}
+
+static int wal_cfg80211_set_default_mgmt_key_ops(struct wiphy *wiphy, struct net_device *dev,
+    int link_id, u8 key_index)
+{
+    return wal_cfg80211_set_default_mgmt_key(wiphy, dev, key_index);
+}
+
+static int wal_cfg80211_set_wiphy_params_ops(struct wiphy *wiphy, int radio_idx, u32 changed)
+{
+    return wal_cfg80211_set_wiphy_params(wiphy, changed);
+}
+
+static int wal_cfg80211_change_beacon_ops(struct wiphy *wiphy, struct net_device *dev,
+    struct cfg80211_ap_update *info)
+{
+    return wal_cfg80211_change_beacon(wiphy, dev, &info->beacon);
+}
+
+static int wal_cfg80211_stop_ap_ops(struct wiphy *wiphy, struct net_device *dev, unsigned int link_id)
+{
+    return wal_cfg80211_stop_ap(wiphy, dev);
+}
+
+static int wal_cfg80211_set_bitrate_mask_ops(struct wiphy *wiphy, struct net_device *dev,
+    unsigned int link_id, const u8 *peer, const struct cfg80211_bitrate_mask *mask)
+{
+    return wal_cfg80211_set_bitrate_mask(wiphy, dev, peer, mask);
+}
+
+static void wal_cfg80211_update_mgmt_frame_regs(struct wiphy *wiphy, struct wireless_dev *wdev,
+    struct mgmt_frame_regs *upd)
+{
+    /* the vendor handler accepted every registration and did nothing */
+}
+
 OAL_STATIC oal_cfg80211_ops_stru g_wal_cfg80211_ops = {
     .scan = wal_cfg80211_scan,
     .connect = wal_cfg80211_connect,
     .disconnect = wal_cfg80211_disconnect,
-    .add_key = wal_cfg80211_add_key,
-    .get_key = wal_cfg80211_get_key,
-    .del_key = wal_cfg80211_remove_key,
-    .set_default_key = wal_cfg80211_set_default_key,
-    .set_default_mgmt_key = wal_cfg80211_set_default_mgmt_key,
-    .set_wiphy_params = wal_cfg80211_set_wiphy_params,
-    .change_beacon = wal_cfg80211_change_beacon,
+    .add_key = wal_cfg80211_add_key_ops,
+    .get_key = wal_cfg80211_get_key_ops,
+    .del_key = wal_cfg80211_del_key_ops,
+    .set_default_key = wal_cfg80211_set_default_key_ops,
+    .set_default_mgmt_key = wal_cfg80211_set_default_mgmt_key_ops,
+    .set_wiphy_params = wal_cfg80211_set_wiphy_params_ops,
+    .change_beacon = wal_cfg80211_change_beacon_ops,
     .start_ap = wal_cfg80211_start_ap,
-    .stop_ap = wal_cfg80211_stop_ap,
+    .stop_ap = wal_cfg80211_stop_ap_ops,
     .change_bss = wal_cfg80211_change_bss,
     .sched_scan_start = wal_cfg80211_sched_scan_start,
     .sched_scan_stop = wal_cfg80211_sched_scan_stop,
@@ -4969,8 +5033,8 @@ OAL_STATIC oal_cfg80211_ops_stru g_wal_cfg80211_ops = {
     .remain_on_channel = wal_cfg80211_remain_on_channel,
     .cancel_remain_on_channel = wal_cfg80211_cancel_remain_on_channel,
     .mgmt_tx = wal_cfg80211_mgmt_tx,
-    .mgmt_frame_register = wal_cfg80211_mgmt_frame_register,
-    .set_bitrate_mask = wal_cfg80211_set_bitrate_mask,
+    .update_mgmt_frame_registrations = wal_cfg80211_update_mgmt_frame_regs,
+    .set_bitrate_mask = wal_cfg80211_set_bitrate_mask_ops,
     .add_virtual_intf = wal_cfg80211_add_virtual_intf,
     .del_virtual_intf = wal_cfg80211_del_virtual_intf,
     .mgmt_tx_cancel_wait = wal_cfg80211_mgmt_tx_cancel_wait,

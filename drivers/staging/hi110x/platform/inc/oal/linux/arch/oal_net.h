@@ -158,6 +158,8 @@ typedef iw_handler oal_iw_handler;
 #define oal_netdevice_rtnl_link_ops(_pst_dev)    ((_pst_dev)->rtnl_link_ops)
 #define oal_netdevice_rtnl_link_state(_pst_dev)  ((_pst_dev)->rtnl_link_state)
 #define oal_netdevice_mac_addr(_pst_dev)         ((_pst_dev)->dev_addr)
+/* dev_addr is read-only since 5.17 */
+#define oal_netdev_set_mac(_pst_dev, _mac)       eth_hw_addr_set((_pst_dev), (const uint8_t *)(_mac))
 #define oal_netdevice_tx_queue_len(_pst_dev)     ((_pst_dev)->tx_queue_len)
 #define oal_netdevice_tx_queue_num(_pst_dev)     ((_pst_dev)->num_tx_queues)
 #define oal_netdevice_tx_queue(_pst_dev, _index) ((_pst_dev)->_tx[_index])
@@ -1069,7 +1071,7 @@ OAL_STATIC OAL_INLINE int32_t oal_net_device_set_macaddr(oal_net_device_stru *ps
 
     pst_mac = (oal_sockaddr_stru *)pst_addr;
 
-    memcpy_s(pst_dev->dev_addr, ul_net_device_mac_addr_len, pst_mac->sa_data, ul_protocol_addr_len);
+    dev_addr_mod(pst_dev, 0, pst_mac->sa_data, oal_min(ul_net_device_mac_addr_len, ul_protocol_addr_len));
 
     return OAL_SUCC;
 }
@@ -1873,14 +1875,14 @@ OAL_STATIC OAL_INLINE void oal_local_bh_enable(void)
 
 OAL_STATIC OAL_INLINE void oal_napi_schedule(struct napi_struct *napi)
 {
-    napi_schedule(napi);
-#ifndef _PRE_PRODUCT_HI3751V811
-#ifndef CONFIG_HI110X_KERNEL_MODULES_BUILD_SUPPORT
-    if (local_softirq_pending()) {
-        do_softirq();
+    /* run the NAPI softirq right away when called from process context */
+    if (in_hardirq() || irqs_disabled()) {
+        napi_schedule(napi);
+    } else {
+        local_bh_disable();
+        napi_schedule(napi);
+        local_bh_enable();
     }
-#endif
-#endif
 }
 
 OAL_STATIC OAL_INLINE void oal_napi_gro_receive(struct napi_struct *napi, oal_netbuf_stru *pst_netbuf)
@@ -1901,7 +1903,7 @@ OAL_STATIC OAL_INLINE void oal_napi_complete(struct napi_struct *napi)
 OAL_STATIC OAL_INLINE void oal_netif_napi_add(struct net_device *dev, struct napi_struct *napi,
                                               int (*poll)(struct napi_struct *, int), int weight)
 {
-    netif_napi_add(dev, napi, poll, weight);
+    netif_napi_add_weight(dev, napi, poll, weight);
 }
 
 OAL_STATIC OAL_INLINE void oal_napi_disable(struct napi_struct *napi)
@@ -1944,7 +1946,6 @@ OAL_STATIC OAL_INLINE oal_sock_stru *oal_netlink_kernel_create(oal_net_stru *pst
     memset_s(&cfg, sizeof(cfg), 0, sizeof(cfg));
     cfg.groups = 0;
     cfg.input = input;
-    cfg.cb_mutex = NULL;
 
     return netlink_kernel_create(pst_net, l_unit, &cfg);
 #else

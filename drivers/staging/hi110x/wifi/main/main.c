@@ -366,6 +366,20 @@ void hi110x_host_main_exit(void)
 
 int32_t g_wifi_init_flag = 0;
 int32_t g_wifi_init_ret;
+static DEFINE_MUTEX(g_wifi_boot_lock);
+
+/* run hi110x_host_main_init() once; module autoboot work and the sysfs file */
+int32_t hi110x_boot_wifi(void)
+{
+    mutex_lock(&g_wifi_boot_lock);
+    if (g_wifi_init_flag == 0) {
+        g_wifi_init_ret = hi110x_host_main_init();
+        g_wifi_init_flag = 1;
+    }
+    mutex_unlock(&g_wifi_boot_lock);
+    return g_wifi_init_ret;
+}
+
 /* built-in */
 OAL_STATIC ssize_t wifi_sysfs_set_init(struct kobject *dev, struct kobj_attribute *attr, const char *buf, size_t count)
 {
@@ -394,8 +408,7 @@ OAL_STATIC ssize_t wifi_sysfs_set_init(struct kobject *dev, struct kobj_attribut
     if (sysfs_streq("init", mode)) {
         /* init */
         if (g_wifi_init_flag == 0) {
-            g_wifi_init_ret = hi110x_host_main_init();
-            g_wifi_init_flag = 1;
+            hi110x_boot_wifi();
         } else {
             oal_io_print("double init!\n");
         }

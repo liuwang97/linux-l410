@@ -102,7 +102,7 @@
 #define INI_FILE_TIMESPEC_RECONFIG      BIT0
 #define INI_NVRAM_RECONFIG              BIT1
 
-#define inf_file_get_ctime(file_dentry) ((file_dentry)->d_inode->i_ctime.tv_sec)
+#define inf_file_get_ctime(file_dentry) inode_get_ctime_sec(d_inode(file_dentry))
 
 typedef uint32_t (*fun_wifi_customize_t)(void);
 

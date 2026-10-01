@@ -180,7 +180,8 @@ OAL_STATIC OAL_INLINE int32_t oal_print_rate_limit(unsigned long timeout)
 
 typedef struct _oal_wakelock_stru_ {
 #if ((LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37)) && (_PRE_OS_VERSION_LINUX == _PRE_OS_VERSION))
-    struct wakeup_source st_wakelock;  // wakelock锁
+    struct wakeup_source *st_wakelock;  // wakelock锁 (registered wakeup source)
+    const char *name;
     oal_spin_lock_stru lock;           // wakelock锁操作spinlock锁
     oal_dlist_head_stru list;
 #endif
@@ -209,7 +210,8 @@ OAL_STATIC OAL_INLINE void oal_wake_lock_init(oal_wakelock_stru *pst_wakelock, c
 #ifdef _PRE_WINDOWS_SUPPORT
     oal_spin_lock_init(&g_wakelock_lock);
 #endif
-    oal_wakeup_source_init(&pst_wakelock->st_wakelock, name ? name : "wake_lock_null");
+    pst_wakelock->name = name ? name : "wake_lock_null";
+    pst_wakelock->st_wakelock = wakeup_source_register(NULL, pst_wakelock->name);
     oal_spin_lock_init(&pst_wakelock->lock);
     pst_wakelock->lock_count = 0;
     pst_wakelock->locked_addr = 0;
@@ -227,7 +229,8 @@ OAL_STATIC OAL_INLINE void oal_wake_lock_exit(oal_wakelock_stru *pst_wakelock)
     oal_spin_lock_irq_save(&g_wakelock_lock, &flags);
     oal_dlist_delete_entry(&pst_wakelock->list);
     oal_spin_unlock_irq_restore(&g_wakelock_lock, &flags);
-    oal_wakeup_source_trash(&pst_wakelock->st_wakelock);
+    wakeup_source_unregister(pst_wakelock->st_wakelock);
+    pst_wakelock->st_wakelock = NULL;
 #endif
 }
 
@@ -244,13 +247,13 @@ OAL_STATIC OAL_INLINE void oal_wake_lock(oal_wakelock_stru *pst_wakelock)
 
     oal_spin_lock_irq_save(&pst_wakelock->lock, &flags);
     if (!pst_wakelock->lock_count) {
-        __pm_stay_awake(&pst_wakelock->st_wakelock);
+        __pm_stay_awake(pst_wakelock->st_wakelock);
         pst_wakelock->locked_addr = (uintptr_t)_RET_IP_;
     }
     pst_wakelock->lock_count++;
     if (oal_unlikely(pst_wakelock->debug)) {
         printk(KERN_INFO "wakelock[%s] lockcnt:%lu <==%pf\n",
-               pst_wakelock->st_wakelock.name, pst_wakelock->lock_count, (void *)_RET_IP_);
+               pst_wakelock->name, pst_wakelock->lock_count, (void *)_RET_IP_);
     }
     oal_spin_unlock_irq_restore(&pst_wakelock->lock, &flags);
 #endif
@@ -271,13 +274,13 @@ OAL_STATIC OAL_INLINE void oal_wake_unlock(oal_wakelock_stru *pst_wakelock)
     if (pst_wakelock->lock_count) {
         pst_wakelock->lock_count--;
         if (!pst_wakelock->lock_count) {
-            __pm_relax(&pst_wakelock->st_wakelock);
+            __pm_relax(pst_wakelock->st_wakelock);
             pst_wakelock->locked_addr = (uintptr_t)0x0;
         }
 
         if (oal_unlikely(pst_wakelock->debug)) {
             printk(KERN_INFO "wakeunlock[%s] lockcnt:%lu <==%pf\n",
-                   pst_wakelock->st_wakelock.name, pst_wakelock->lock_count, (void *)(uintptr_t)_RET_IP_);
+                   pst_wakelock->name, pst_wakelock->lock_count, (void *)(uintptr_t)_RET_IP_);
         }
     }
     oal_spin_unlock_irq_restore(&pst_wakelock->lock, &flags);
@@ -291,7 +294,7 @@ OAL_STATIC OAL_INLINE int32_t oal_wakelock_active(oal_wakelock_stru *pst_wakeloc
         oal_warn_on(1);
         return 0;
     }
-    return pst_wakelock->st_wakelock.active;
+    return pst_wakelock->st_wakelock ? pst_wakelock->st_wakelock->active : 0;
 #else
     return 0;
 #endif
@@ -308,9 +311,9 @@ OAL_STATIC OAL_INLINE void oal_wake_lock_timeout(oal_wakelock_stru *pst_wakelock
 
     oal_spin_lock_irq_save(&pst_wakelock->lock, &flags);
     if (msec < 0) {
-        __pm_stay_awake(&pst_wakelock->st_wakelock);
+        __pm_stay_awake(pst_wakelock->st_wakelock);
     } else {
-        __pm_wakeup_event(&pst_wakelock->st_wakelock, (uint32_t)msec);
+        __pm_wakeup_event(pst_wakelock->st_wakelock, (uint32_t)msec);
     }
 
     pst_wakelock->locked_addr = _RET_IP_;
@@ -327,7 +330,7 @@ OAL_STATIC OAL_INLINE void oal_wake_unlock_force(oal_wakelock_stru *pst_wakelock
 
     oal_spin_lock_irq_save(&pst_wakelock->lock, &flags);
 
-    __pm_relax(&pst_wakelock->st_wakelock);
+    __pm_relax(pst_wakelock->st_wakelock);
     pst_wakelock->locked_addr = (uintptr_t)0x0;
     pst_wakelock->lock_count = 0;
 

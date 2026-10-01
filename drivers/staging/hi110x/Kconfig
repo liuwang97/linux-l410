@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0
+config HI110X
+	tristate "HiSilicon Hi1103/Hi1105 WiFi and Bluetooth (vendor driver)"
+	depends on ARM64 && OF && PCI && CFG80211 && I2C && MMC && SERIAL_DEV_BUS
+	depends on BT
+	select WIRELESS_EXT
+	select WEXT_PRIV
+	select CRC32
+	help
+	  Host driver for the HiSilicon Hi110x connectivity chip as used on the
+	  Huawei Qingyun L410 (Kirin 990): WiFi over PCIe (19e5:1103), Bluetooth
+	  over the BUART serial port. Ported from the vendor 4.19 kernel.
+
+	  The chip firmware is read from /vendor/firmware/hi1103 and the board
+	  configuration from /vendor/etc/cfg_udp_1103_pilot.ini.
+
+	  The module is called hi110x.

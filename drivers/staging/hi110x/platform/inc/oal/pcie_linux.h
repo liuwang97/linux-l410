@@ -8,21 +8,7 @@
 #include "oal_schedule.h"
 
 #ifdef CONFIG_ARCH_KIRIN_PCIE
-#ifndef _PRE_HI375X_PCIE
-#ifdef CONFIG_ARCH_PLATFORM
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
-#include <linux/platform_drivers/pcie-kport-api.h>
-#else
-#include <linux/hisi/pcie-kport-api.h>
-#endif
-#else
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
-#include <linux/platform_drivers/pcie-kirin-api.h>
-#else
-#include <linux/hisi/pcie-kirin-api.h>
-#endif
-#endif
-#endif
+#include "hi110x_kport.h"
 #endif
 
 extern int32_t g_kirin_rc_idx;
@@ -52,35 +38,7 @@ int hipcie_power_notifiy_register(u32 rc_idx, int (*poweron)(void* data),
 #endif
 
 #else
-#ifdef CONFIG_ARCH_KIRIN_PCIE
-#ifdef CONFIG_ARCH_PLATFORM
-#define KIRIN_PCIE_EVENT_LINKDOWN PCIE_KPORT_EVENT_LINKDOWN
-#define KIRIN_PCIE_TRIGGER_CALLBACK PCIE_KPORT_TRIGGER_CALLBACK
-int pcie_kport_enumerate(u32 rc_idx);
-int pcie_kport_pm_control(int power_ops, u32 rc_idx);
-int pcie_kport_lp_ctrl(u32 rc_idx, u32 enable);
-int pcie_kport_register_event(struct pcie_kport_register_event *reg);
-int pcie_kport_deregister_event(struct pcie_kport_register_event *reg);
-int pcie_kport_power_notifiy_register(u32 rc_id, int (*poweron)(void *data),
-                                      int (*poweroff)(void *data), void *data);
-#define kirin_pcie_enumerate                pcie_kport_enumerate
-#define kirin_pcie_pm_control               pcie_kport_pm_control
-#define kirin_pcie_lp_ctrl                  pcie_kport_lp_ctrl
-#define kirin_pcie_power_notifiy_register   pcie_kport_power_notifiy_register
-#define kirin_pcie_register_event           pcie_kport_register_event
-#define kirin_pcie_deregister_event         pcie_kport_deregister_event
-#define kirin_pcie_notify                   pcie_kport_notify
-#else
-/* hisi kirin PCIe functions */
-int kirin_pcie_enumerate(u32 rc_idx);
-int kirin_pcie_pm_control(int resume_flag, u32 rc_idx);
-int kirin_pcie_lp_ctrl(u32 rc_idx, u32 enable);
-/* notify WiFi when RC PCIE power on/off */
-int kirin_pcie_power_notifiy_register(u32 rc_idx, int (*poweron)(void *data),
-                                      int (*poweroff)(void *data), void *data);
-#endif
-u32 show_link_state(u32 rc_id);
-#endif
+/* kport RC API: see hi110x_kport.h */
 #endif
 
 #define OAL_PCIE_MIN_MPS 128

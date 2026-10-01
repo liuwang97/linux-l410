@@ -361,7 +361,8 @@ OAL_STATIC uint32_t hmac_vap_creat_netdev_set_net_device(oal_net_device_stru *ne
 
     oal_netdevice_ifalias(net_device) = NULL;
     oal_netdevice_watchdog_timeo(net_device) = HMAC_NETDEVICE_WDT_TIMEOUT;
-    ret = memcpy_s(oal_netdevice_mac_addr(net_device), WLAN_MAC_ADDR_LEN, mac_addr, WLAN_MAC_ADDR_LEN);
+    oal_netdev_set_mac(net_device, mac_addr);
+    ret = EOK;
     oal_net_dev_priv(net_device) = vap;
     oal_netdevice_qdisc(net_device, NULL);
 

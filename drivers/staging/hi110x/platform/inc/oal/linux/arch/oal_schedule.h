@@ -519,9 +519,9 @@ OAL_STATIC OAL_INLINE int32_t oal_atomic_dec_and_test(oal_atomic *p_vector)
  */
 OAL_STATIC OAL_INLINE void oal_time_get_stamp_us(oal_time_us_stru *pst_usec)
 {
-    struct timespec ts = {0};
+    struct timespec64 ts = {0};
 
-    getnstimeofday(&ts);
+    ktime_get_real_ts64(&ts);
 
     pst_usec->i_sec = ts.tv_sec;
 
@@ -561,7 +561,7 @@ OAL_STATIC OAL_INLINE void oal_timer_init(oal_timer_list_stru *pst_timer, uint32
 
 OAL_STATIC OAL_INLINE int32_t oal_timer_delete(oal_timer_list_stru *pst_timer)
 {
-    return del_timer(pst_timer);
+    return timer_delete(pst_timer);
 }
 
 /*
@@ -571,7 +571,7 @@ OAL_STATIC OAL_INLINE int32_t oal_timer_delete(oal_timer_list_stru *pst_timer)
  */
 OAL_STATIC OAL_INLINE int32_t oal_timer_delete_sync(oal_timer_list_stru *pst_timer)
 {
-    return del_timer_sync(pst_timer);
+    return timer_delete_sync(pst_timer);
 }
 
 /*
@@ -797,16 +797,16 @@ OAL_STATIC OAL_INLINE uint64_t oal_get_time_stamp_from_timeval(void)
 
 OAL_STATIC OAL_INLINE void oal_get_real_time(oal_time_stru *pst_tm)
 {
-    struct timex txc;
     struct rtc_time tm = {0};
+    time64_t now;
 
     /* 获取当前UTC时间 */
-    oal_do_gettimeofday(&(txc.time));
+    now = ktime_get_real_seconds();
 
     /* 把UTC时间调整本地时间 */
-    txc.time.tv_sec -= sys_tz.tz_minuteswest * OAL_SEC_PER_MIN;
+    now -= sys_tz.tz_minuteswest * OAL_SEC_PER_MIN;
     /* 算出时间中的年月日等数值到tm中 */
-    rtc_time_to_tm(txc.time.tv_sec, &tm);
+    rtc_time64_to_tm(now, &tm);
 
     memcpy_s(pst_tm, sizeof(oal_time_stru), &tm, sizeof(oal_time_stru));
 }
@@ -819,33 +819,6 @@ OAL_STATIC OAL_INLINE unsigned long oal_access_write_ok(const void __user *addr,
     return access_ok(VERIFY_WRITE, addr, size);
 #else
     return access_ok(addr, size);
-#endif
-}
-
-OAL_STATIC OAL_INLINE void oal_wakeup_source_init(struct wakeup_source *ws,
-    const char *name)
-{
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
-    if (ws) {
-        memset_s((void *)ws, sizeof(*ws), 0, sizeof(*ws));
-        ws->name = name;
-    }
-    wakeup_source_add(ws);
-#else
-    wakeup_source_init(ws, name);
-#endif
-}
-
-OAL_STATIC OAL_INLINE void oal_wakeup_source_trash(struct wakeup_source *ws)
-{
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
-    if (!ws) {
-        return;
-    }
-    wakeup_source_remove(ws);
-    __pm_relax(ws);
-#else
-    wakeup_source_trash(ws);
 #endif
 }
 
