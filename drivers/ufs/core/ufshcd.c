@@ -3469,6 +3469,7 @@ out_unlock:
 	ufshcd_dev_man_unlock(hba);
 	return err;
 }
+EXPORT_SYMBOL_GPL(ufshcd_query_flag);
 
 /**
  * ufshcd_query_attr - API function for sending attribute requests
