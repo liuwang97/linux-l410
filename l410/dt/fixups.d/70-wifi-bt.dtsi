@@ -1,4 +1,4 @@
-// T7 wifi-bt: Hi110x (Hi1103) WiFi/BT fixups on top of the firmware DT.
+// WiFi/Bluetooth: Hi110x (Hi1103) WiFi/BT fixups on top of the firmware DT.
 
 // The vendor kernel looked up the chip's 32 kHz sleep clock by its output name
 // ("huawei,pmu_clk32b" = "clk_pmu32kb", the PMIC clk_pmu32kb gate, phandle 0x503).

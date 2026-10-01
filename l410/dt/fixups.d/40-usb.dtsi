@@ -1,6 +1,6 @@
-// T4 USB: Kirin 990 DWC3 (host only) + USB 3.1/DP combo PHY + on-board
+// USB: Kirin 990 DWC3 (host only) + USB 3.1/DP combo PHY + on-board
 // Realtek RTS5411 hub (USB 2.0 part 0bda:5411, USB 3 part 0bda:0411), behind
-// which sits the RTL8153 used for ssh.
+// which sit the built-in camera and plugged-in devices such as an RTL8153 adapter.
 
 &{/usb_phy@f8480000} {
 	#phy-cells = <0>;

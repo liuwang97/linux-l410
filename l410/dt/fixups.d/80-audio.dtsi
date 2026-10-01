@@ -1,4 +1,4 @@
-// T8 audio: Hi6405 codec (SSI registers, SLIMbus data), ASP DMA PCM,
+// Audio: Hi6405 codec (SSI registers, SLIMbus data), ASP DMA PCM,
 // TAS2562 speaker amplifiers. Phandles are the firmware DT's own.
 
 // HiFi DSP data carve-out. The ASP DMA masters only reach this area; the

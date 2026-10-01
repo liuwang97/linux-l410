@@ -1,4 +1,4 @@
-// T2 power: PMIC on SPMI.
+// Power: PMIC on SPMI.
 //
 // The vendor kernel finds the SPMI slave id in a "slave_id" property; the
 // mainline SPMI core wants the generic binding: #address-cells = <2> on the

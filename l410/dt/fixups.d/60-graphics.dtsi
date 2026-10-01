@@ -1,4 +1,4 @@
-// T6 graphics: Kirin 990 display subsystem and Mali-G76 GPU.
+// Graphics: Kirin 990 display subsystem and Mali-G76 GPU.
 
 // Display: kirin990-dss (DRM "kirin") takes over the pipeline UEFI lit and
 // scans out physically contiguous buffers with the DSS-internal SMMU bypassed;

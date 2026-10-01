@@ -1,4 +1,12 @@
-L410 build inputs (read by l410-mainline/scripts/build.sh):
-  configs/*.config      Kconfig fragments merged on top of arm64 defconfig, in name order
-  dt/fixups.d/*.dtsi    patches applied to the firmware device tree (dt/l410-firmware.dts in l410-mainline)
-Each bring-up track adds its own NN-<track> files.
+Huawei Qingyun L410 (Kirin 990) build inputs, used by l410/build.sh:
+
+  configs/*.config      Kconfig fragments, merged in name order on top of arm64 defconfig
+  dt/l410-firmware.dts  device tree the L410 UEFI firmware hands to the vendor 4.19 kernel
+                        (decompiled from /sys/firmware/fdt under Kylin)
+  dt/fixups.d/*.dtsi    what the 6.18 drivers need changed in it, included in name order
+  initramfs/init        busybox init: mounts root= and switches to it (l410.mode=probe only
+                        logs diagnostics and reboots)
+  firmware/             USB 3.1 combo PHY firmware, built in with CONFIG_EXTRA_FIRMWARE
+  build.sh              cross-compiles Image, modules, l410.dtb and initrd.img (see --help)
+
+The NN- prefixes only set the order; each file is named after the subsystem it serves.

@@ -1,4 +1,4 @@
-// T5 pcie: stable PCI domain numbers, as on the vendor kernel
+// PCIe: stable PCI domain numbers, as on the vendor kernel
 // (RC0 -> 0000 RTL8168, RC1 -> 0001 Hi110x), independent of probe order.
 &{/pcie_kport_rc@0xf0000000} {
 	linux,pci-domain = <0>;

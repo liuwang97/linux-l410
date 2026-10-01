@@ -1,0 +1,89 @@
+#!/bin/busybox sh
+# initramfs of the L410 kernel (l410/build.sh packs it with a static busybox).
+#   l410.mode=probe   dump diagnostics to the kernel log (-> pstore console) and reboot
+#   l410.mode=root    (default) mount root= and switch_root; on failure dump + reboot
+#   l410.hold=<sec>   seconds to wait before rebooting after a dump (default 20)
+/bin/busybox --install -s /bin
+export PATH=/bin
+mkdir -p /proc /sys /dev /run /newroot /tmp
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+
+kmsg() { echo "L410INIT: $*" > /dev/kmsg; }
+
+mode=root hold=20 root=""
+for a in $(cat /proc/cmdline); do
+	case $a in
+	l410.mode=*) mode=${a#l410.mode=} ;;
+	l410.hold=*) hold=${a#l410.hold=} ;;
+	root=*) root=${a#root=} ;;
+	esac
+done
+kmsg "start mode=$mode root=$root kernel=$(uname -r)"
+
+dumpfile() { # $1 title, $2 file
+	[ -r "$2" ] || return
+	kmsg "----- $1"
+	while IFS= read -r line; do kmsg "$line"; done < "$2"
+}
+
+dump() {
+	kmsg "===== diagnostics"
+	cat /proc/cpuinfo | grep -E "^processor|CPU part|CPU implementer" | tr '\n' ' ' > /tmp/cpus; echo >> /tmp/cpus
+	dumpfile cpus /tmp/cpus
+	dumpfile meminfo-head /proc/meminfo
+	dumpfile interrupts /proc/interrupts
+	dumpfile deferred /sys/kernel/debug/devices_deferred
+	ls /sys/bus/platform/drivers > /tmp/drv 2>&1; dumpfile platform-drivers /tmp/drv
+	for d in /sys/bus/platform/devices/*; do [ -e "$d/driver" ] && echo "$(basename $d) -> $(basename $(readlink $d/driver))"; done > /tmp/bound 2>&1
+	dumpfile bound /tmp/bound
+	ls -l /sys/class/block/ > /tmp/blk 2>&1; dumpfile block /tmp/blk
+	ls /sys/class/net > /tmp/net 2>&1; dumpfile net /tmp/net
+	ls /sys/bus/usb/devices > /tmp/usb 2>&1; dumpfile usb /tmp/usb
+	[ -x /l410-extra.sh ] && /l410-extra.sh 2>&1 | while IFS= read -r line; do kmsg "extra: $line"; done
+	kmsg "===== end diagnostics"
+}
+
+bye() {
+	kmsg "rebooting in $hold s"
+	sleep "$hold"
+	sync
+	reboot -f
+}
+
+if [ "$mode" = probe ]; then
+	sleep 5
+	dump
+	bye
+fi
+
+# mode=root
+dev=""
+i=0
+while [ $i -lt 60 ]; do
+	case $root in
+	UUID=* | PARTUUID=* | LABEL=*) dev=$(findfs "$root" 2>/dev/null) ;;
+	/dev/*) [ -b "$root" ] && dev=$root ;;
+	esac
+	[ -n "$dev" ] && break
+	sleep 1
+	i=$((i + 1))
+done
+if [ -z "$dev" ]; then
+	kmsg "root $root not found after 60 s"
+	dump
+	bye
+fi
+kmsg "root device $dev"
+if ! mount -o ro "$dev" /newroot; then
+	kmsg "mount $dev failed"
+	dump
+	bye
+fi
+umount /sys/kernel/debug 2>/dev/null
+mount --move /dev /newroot/dev 2>/dev/null
+umount /sys /proc 2>/dev/null
+kmsg "switch_root"
+exec switch_root /newroot /sbin/init

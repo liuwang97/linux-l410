@@ -1,4 +1,4 @@
-// T9 laptop: keyboard, touchpad, EC, lid.
+// Laptop: keyboard, touchpad, EC, lid.
 //
 // The vendor kernel used legacy GPIO numbers (8 per pl061 bank, bank N = alias gpioN):
 //   232/236 i2c-hid IRQs -> gpio29 (fa8b1000) lines 0/4

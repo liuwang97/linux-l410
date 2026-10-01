@@ -1,4 +1,4 @@
-// T4 USB: power/reset of the on-board RTS5411 hub through onboard_usb_dev.
+// USB: power/reset of the on-board RTS5411 hub through onboard_usb_dev.
 // Needs gpio@fe010000 (pl061) and its pinctrl-single range. If the regulator or
 // GPIO ever defers, the onboard_usb_dev USB driver defers on the hub device too
 // and the hub gets re-configured on every deferred-probe retry.
