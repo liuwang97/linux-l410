@@ -1052,6 +1052,15 @@ static int __i2c_hid_core_probe(struct i2c_hid *ihid)
 
 	ret = i2c_hid_fetch_hid_descriptor(ihid);
 	if (ret < 0) {
+		/*
+		 * Keyboards emulated by an embedded controller (e.g. on the
+		 * Huawei Qingyun L410) can drop a request that follows the
+		 * previous one too closely. Give them a second chance.
+		 */
+		usleep_range(1000, 2000);
+		ret = i2c_hid_fetch_hid_descriptor(ihid);
+	}
+	if (ret < 0) {
 		dev_err(&client->dev,
 			"Failed to fetch the HID Descriptor\n");
 		return ret;
