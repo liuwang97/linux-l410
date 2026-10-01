@@ -221,6 +221,19 @@ int32_t ps_change_uart_baud_rate(struct ps_core_s *ps_core_d, long baud_rate, ui
         return -ENODEV;
     }
     serdev_device_write_flush(ps_core_d->tty);
+    /*
+     * The flush only drops what is still queued; a character already in the PL011
+     * FIFO keeps going out. The rate and frame format must not change while the
+     * transmitter is busy (PL011 TRM: UARTLCR_H, UARTIBRD and UARTFBRD), and
+     * pl011_set_termios() does not wait. That happens on every wake-up of a BFGX
+     * that has not powered its UART down yet: its GPIO answer to the 115200 baud
+     * zero byte comes 20-90 us after the byte was queued, while the byte takes
+     * 87 us, and the switch to 4 Mbaud followed at once. Once in a while the host
+     * transmitter then sent nothing BFGX could take in (no answer to the disallow
+     * message, the HCI command or the next allow-sleep) until the port was closed
+     * and the UART reset by the beat timeout resync.
+     */
+    serdev_device_wait_until_sent(ps_core_d->tty, msecs_to_jiffies(20));
     ps_serdev_set_termios(ps_core_d->tty, ps_plat_d->baud_rate, ps_plat_d->flow_cntrl);
     mutex_unlock(&ps_core_d->tty_mutex);
 
