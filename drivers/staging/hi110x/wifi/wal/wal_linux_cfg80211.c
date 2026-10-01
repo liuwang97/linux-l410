@@ -3169,13 +3169,30 @@ OAL_STATIC int32_t wal_cfg80211_get_station(oal_wiphy_stru *pst_wiphy,
 }
 
 
+/*
+ * cfg80211 keeps dumping stations until the driver returns -ENOENT. The vendor stub returned success for
+ * every index, so a station dump never ended: NetworkManager 1.5x dumps stations for the AP's signal and
+ * bitrate and spun on it forever (100 % CPU, no D-Bus answers), `iw dev wlan0 station dump` hung. A
+ * connected station has one entry, its AP; nothing else is listed.
+ */
 OAL_STATIC int32_t wal_cfg80211_dump_station(oal_wiphy_stru *pst_wiphy,
                                              oal_net_device_stru *pst_dev,
                                              int32_t int_index,
                                              uint8_t *puc_mac,
                                              oal_station_info_stru *pst_sta_info)
 {
-    return OAL_SUCC;
+    mac_vap_stru *pst_mac_vap = NULL;
+
+    if (int_index != 0 || oal_any_null_ptr3(pst_dev, puc_mac, pst_sta_info)) {
+        return -ENOENT;
+    }
+    pst_mac_vap = oal_net_dev_priv(pst_dev);
+    if (pst_mac_vap == NULL || !IS_STA(pst_mac_vap) ||
+        (pst_mac_vap->en_vap_state != MAC_VAP_STATE_UP && pst_mac_vap->en_vap_state != MAC_VAP_STATE_PAUSE)) {
+        return -ENOENT;
+    }
+    oal_set_mac_addr(puc_mac, pst_mac_vap->auc_bssid);
+    return wal_cfg80211_get_station(pst_wiphy, pst_dev, puc_mac, pst_sta_info);
 }
 
 
