@@ -6,9 +6,14 @@
  * DSI-to-eDP bridge. UEFI brings the whole pipeline up (power, clocks, DSI
  * link, bridge, panel, backlight) and scans out its GOP framebuffer through
  * one read channel of overlay OV0. This driver takes that running pipeline
- * over: it reads the mode back from the DSI/LDI registers and re-points the
- * read channel at DRM framebuffers. A full modeset (DSI host + bridge chain)
- * is not implemented yet.
+ * over at probe: it reads the mode back from the DSI/LDI registers and
+ * re-points the read channel at DRM framebuffers.
+ *
+ * Disabling the CRTC (DPMS off, suspend) powers the whole chain down the way
+ * the vendor kernel does: backlight, eDP stream, DSI link and D-PHY, bridge
+ * and panel supplies, then the DSS clocks and power domains. Enabling it
+ * again sets everything up from reset (kirin990_power.c, kirin990_dsi.c,
+ * kirin990_edp.c).
  *
  * The DRM driver name is "kirin" so that Mesa's kmsro pairs it with Panfrost.
  */
@@ -24,7 +29,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/regulator/consumer.h>
+#include <linux/pm.h>
 #include <linux/sched.h>
 #include <linux/soc/hisilicon/l410-perf.h>
 
@@ -42,27 +47,20 @@
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_modeset_helper.h>
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
-#include "kirin990_dss_regs.h"
-
-#define KIRIN_NUM_RCH		8
+#include "kirin990_drv.h"
 
 /*
  * Read channels, indexed by the MCTL channel number. Only channels without a
  * scaler are listed as candidates for the primary plane.
  */
-struct kirin_rch {
-	u32 dma;	/* DMA block; DFC, DMA_BUF and REG_DEFAULT hang off it */
-	u8 smr_first;	/* first SMMU stream (SMR) index */
-	u8 smr_num;
-};
-
-static const struct kirin_rch kirin_rch[KIRIN_NUM_RCH] = {
+const struct kirin_rch kirin_rch[KIRIN_NUM_RCH] = {
 	[0] = { 0x52000, 0, 4 },
 	[1] = { 0x53000, 4, 1 },
 	[2] = { 0x20000, 5, 4 },	/* VG0: scaler + ARSR */
@@ -71,13 +69,6 @@ static const struct kirin_rch kirin_rch[KIRIN_NUM_RCH] = {
 	[5] = { 0x40000, 17, 4 },	/* G1: scaler */
 	[6] = { 0x50000, 21, 1 },
 	[7] = { 0x51000, 22, 1 },
-};
-
-struct kirin_format {
-	u32 fourcc;
-	u8 dma_fmt;
-	u8 dfc_fmt;
-	bool alpha;
 };
 
 static const struct kirin_format kirin_formats[] = {
@@ -96,52 +87,6 @@ static const u64 kirin_modifiers[] = {
 	DRM_FORMAT_MOD_INVALID,
 };
 
-struct kirin_dss {
-	struct drm_device drm;
-	void __iomem *base;
-	int irq;
-
-	struct drm_plane plane;
-	struct drm_plane cursor;
-	unsigned int cursor_ch;		/* read channel of the cursor plane */
-	unsigned int cursor_layer;	/* OV0 layer of the cursor plane */
-	u32 rch_ctl, rch_buf_ctrl, rch_bitext;	/* channel defaults, from UEFI */
-	struct drm_crtc crtc;
-	struct drm_encoder encoder;
-	struct drm_connector connector;
-
-	struct drm_display_mode fw_mode;
-	unsigned int ch;		/* read channel feeding OV0 */
-	unsigned int layer;		/* OV0 layer used by that channel */
-	bool smmu_translate;		/* firmware used the DSS SMMU for this channel */
-	/* firmware scanout buffer (reserved by UEFI), shown while we're off */
-	u32 fw_addr, fw_stride, fw_ctrl, fw_fmt, fw_mif1;
-	u32 fw_smr[4];
-	bool fw_translate;
-
-	spinlock_t irq_lock;
-	u32 underflows;
-	struct work_struct recover_work;
-	struct delayed_work report_work;
-
-	/* transparent buffer the cursor layer shows while "hidden" */
-	void *cursor_blank;
-	dma_addr_t cursor_blank_dma;
-
-	/* nonblocking commits run here: SCHED_FIFO, as msm's commit threads */
-	struct kthread_worker *commit_worker;
-
-	/* filtered vblank timestamps (irq_lock) */
-	ktime_t vbl_raw, vbl_est;
-	u64 frame_ns;
-
-	/* primary plane flips: vblanks between consecutive new frames */
-	u64 last_flip_vbl;
-	unsigned long flips, flip_gap[4];	/* 1, 2, 3, 4+ vblanks */
-	unsigned long flush_in_blank;		/* flushed in VFP/VSW/VBP */
-	unsigned long foreign_imports;		/* dma-bufs refused */
-};
-
 /* nonblocking commits are handed to the SCHED_FIFO worker in this state */
 struct kirin_atomic_state {
 	struct drm_atomic_state base;
@@ -149,8 +94,6 @@ struct kirin_atomic_state {
 };
 
 #define to_kirin_state(s) container_of(s, struct kirin_atomic_state, base)
-
-#define to_kirin(x) container_of(x, struct kirin_dss, drm)
 
 static bool dump_state = true;
 module_param(dump_state, bool, 0444);
@@ -185,30 +128,26 @@ static bool foreign_import;
 module_param(foreign_import, bool, 0644);
 MODULE_PARM_DESC(foreign_import, "Try to import dma-bufs of other drivers");
 
-static inline u32 dss_rd(struct kirin_dss *k, u32 off)
-{
-	return readl(k->base + off);
-}
-
-static inline void dss_wr(struct kirin_dss *k, u32 off, u32 val)
-{
-	writel(val, k->base + off);
-}
-
-static inline void dss_rmw(struct kirin_dss *k, u32 off, u32 mask, u32 val)
-{
-	dss_wr(k, off, (dss_rd(k, off) & ~mask) | (val & mask));
-}
-
-static inline u32 dsi_rd(struct kirin_dss *k, u32 off)
-{
-	return readl(k->base + DSS_DSI0 + off);
-}
-
-static inline void dsi_wr(struct kirin_dss *k, u32 off, u32 val)
-{
-	writel(val, k->base + DSS_DSI0 + off);
-}
+/*
+ * How far a disabled CRTC (DPMS off, suspend) powers down:
+ *  0: nothing; the scanout goes back to the UEFI framebuffer, as before
+ *     full modesets were supported (only at boot: the UEFI pipeline must
+ *     not have been power cycled yet)
+ *  1: backlight, eDP panel and bridge, DSI link; the DSS stays powered and
+ *     clocked with the LDI stopped
+ *  2: and the DSS clocks
+ *  3: and the DSS power domain (default)
+ *  4: and the vivobus and media1 domains behind it, as the vendor kernel
+ *     does. On the L410 the machine hangs hard shortly after (without the
+ *     DSS touching anything): something else still depends on them.
+ *
+ * Measured on battery at backlight 50/100: screen
+ * off 3.1-3.6 W -> 1.46-1.48 W at levels 1 and 2 (the DSS clocks have other
+ * users and stay on), 1.31 W at level 3.
+ */
+static int power_off = KIRIN_OFF_DSS;
+module_param(power_off, int, 0644);
+MODULE_PARM_DESC(power_off, "Power-down depth when the display is off (0-4, default 3; 4 hangs the L410)");
 
 /* ------------------------------------------------------------------------ */
 /* bring-up diagnostics */
@@ -443,7 +382,7 @@ found:
 /* ------------------------------------------------------------------------ */
 /* scanout programming */
 
-static const struct kirin_format *kirin_find_format(u32 fourcc)
+const struct kirin_format *kirin_find_format(u32 fourcc)
 {
 	unsigned int i;
 
@@ -453,12 +392,12 @@ static const struct kirin_format *kirin_find_format(u32 fourcc)
 	return NULL;
 }
 
-static void kirin_mutex_lock(struct kirin_dss *k)
+void kirin_mutex_lock(struct kirin_dss *k)
 {
 	dss_wr(k, DSS_MCTL_CTL0 + MCTL_CTL_MUTEX, 1);
 }
 
-static void kirin_mutex_unlock(struct kirin_dss *k)
+void kirin_mutex_unlock(struct kirin_dss *k)
 {
 	dss_wr(k, DSS_MCTL_CTL0 + MCTL_CTL_MUTEX, 0);
 }
@@ -555,14 +494,21 @@ static void kirin_plane_atomic_update(struct drm_plane *plane,
 	struct kirin_dss *k = to_kirin(plane->dev);
 	struct drm_plane_state *new = drm_atomic_get_new_plane_state(state, plane);
 	struct drm_framebuffer *fb = new->fb;
+	const struct kirin_format *fmt;
 	dma_addr_t addr;
 
-	if (!new->visible || !fb)
+	if (!new->visible || !fb || !k->hw_on)
 		return;
 
 	addr = drm_fb_dma_get_gem_addr(fb, new, 0);
-	kirin_rch_update(k, addr, fb->pitches[0],
-			 kirin_find_format(fb->format->format));
+	fmt = kirin_find_format(fb->format->format);
+	if (k->primary_setup) {
+		kirin_rch_update(k, addr, fb->pitches[0], fmt);
+	} else {
+		/* first frame after a power-up: the whole channel and layer */
+		kirin_primary_program(k, addr, fb->pitches[0], fmt);
+		k->primary_setup = true;
+	}
 }
 
 static const struct drm_plane_helper_funcs kirin_plane_helper_funcs = {
@@ -591,11 +537,6 @@ static const struct drm_plane_funcs kirin_plane_funcs = {
 
 #define KIRIN_CURSOR_MAX	256
 
-/* OV layer blending (vendor g_ovl_alpha): opaque source, premultiplied over */
-#define OV_ALPHA_OPAQUE		0x01004000
-#define OV_ALPHA_PREMULT_OVER	0xc2004000
-#define OV_ALPHA_A_OPAQUE	0x03ff03ff
-
 static int kirin_cursor_atomic_check(struct drm_plane *plane,
 				     struct drm_atomic_state *state)
 {
@@ -623,20 +564,21 @@ static int kirin_cursor_atomic_check(struct drm_plane *plane,
 }
 
 /*
- * Program a whole read channel + OV layer (called with the MCTL mutex held).
- * The DMA fetches whole 16-byte units, so the source window is widened to a
- * multiple of 4 pixels and the DFC clips the extra pixels off again. The DMA
- * starts at the first fetched pixel, with zero DMA window offsets.
+ * Program a whole scaler-less read channel + OV layer (called with the MCTL
+ * mutex held). The DMA fetches whole 16-byte units, so the source window is
+ * widened to a multiple of 4 pixels and the DFC clips the extra pixels off
+ * again. The DMA starts at the first fetched pixel, with zero DMA window
+ * offsets. Used for the cursor, and for the primary plane after a power-up.
  *
  * The layer is never switched off again once used: turning an OV layer off
  * and flushing OV0 is what left the LDI in permanent underflow during
  * bring-up. Hiding the cursor shows a transparent buffer instead.
  */
-static void kirin_cursor_program(struct kirin_dss *k, dma_addr_t addr, u32 pitch,
-				 const struct kirin_format *fmt, u32 sx, u32 w,
-				 u32 h, u32 dx, u32 dy, u32 alpha)
+void kirin_layer_program(struct kirin_dss *k, unsigned int ch, unsigned int layer,
+			 dma_addr_t addr, u32 pitch, const struct kirin_format *fmt,
+			 u32 sx, u32 w, u32 h, u32 dx, u32 dy, u32 alpha)
 {
-	const struct kirin_rch *r = &kirin_rch[k->cursor_ch];
+	const struct kirin_rch *r = &kirin_rch[ch];
 	u32 ax0, ax1, clip_l, clip_r, sel;
 	unsigned int i;
 
@@ -648,7 +590,7 @@ static void kirin_cursor_program(struct kirin_dss *k, dma_addr_t addr, u32 pitch
 
 	for (i = 0; i < r->smr_num; i++)
 		dss_wr(k, DSS_SMMU + SMMU_SMRX_NS(r->smr_first + i), SMMU_SMR_BYPASS);
-	dss_wr(k, DSS_MCTL_CTL0 + MCTL_CTL_MUTEX_RCH(k->cursor_ch), 1);
+	dss_wr(k, DSS_MCTL_CTL0 + MCTL_CTL_MUTEX_RCH(ch), 1);
 
 	dss_wr(k, r->dma + DMA_OFT_X0, 0);
 	dss_wr(k, r->dma + DMA_OFT_Y0, 0);
@@ -676,7 +618,7 @@ static void kirin_cursor_program(struct kirin_dss *k, dma_addr_t addr, u32 pitch
 	dss_wr(k, r->dma + DFC_BASE + DFC_PADDING_CTL, 0);
 	dss_wr(k, r->dma + DFC_BASE + DFC_BITEXT_CTL, k->rch_bitext);
 
-	i = DSS_OVL0 + OV_LAYER(k->cursor_layer);
+	i = DSS_OVL0 + OV_LAYER(layer);
 	dss_wr(k, i + OV_LAYER_POS, (dy << 16) | dx);
 	dss_wr(k, i + OV_LAYER_SIZE, ((dy + h - 1) << 16) | (dx + w - 1));
 	dss_wr(k, i + OV_LAYER_PATTERN_RGB, 0);
@@ -687,13 +629,21 @@ static void kirin_cursor_program(struct kirin_dss *k, dma_addr_t addr, u32 pitch
 	dss_wr(k, i + OV_LAYER_CFG, 1);
 
 	sel = dss_rd(k, DSS_MCTL_SYS + MCTL_RCH_OV0_SEL);
-	sel &= ~(0xf << (4 * (k->cursor_layer + 1)));
-	sel |= k->cursor_ch << (4 * (k->cursor_layer + 1));
+	sel &= ~(0xf << (4 * (layer + 1)));
+	sel |= ch << (4 * (layer + 1));
 	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_OV0_SEL, sel);
-	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_STARTY(k->cursor_ch), dy | (8 << 16));
-	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_OV_OEN(k->cursor_ch), MCTL_OV_OEN_OV0);
-	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_FLUSH_EN(k->cursor_ch), 1);
+	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_STARTY(ch), dy | (8 << 16));
+	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_OV_OEN(ch), MCTL_OV_OEN_OV0);
+	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_FLUSH_EN(ch), 1);
 	dss_wr(k, DSS_MCTL_SYS + MCTL_OV0_FLUSH_EN, 0xd);
+}
+
+static void kirin_cursor_program(struct kirin_dss *k, dma_addr_t addr, u32 pitch,
+				 const struct kirin_format *fmt, u32 sx, u32 w,
+				 u32 h, u32 dx, u32 dy, u32 alpha)
+{
+	kirin_layer_program(k, k->cursor_ch, k->cursor_layer, addr, pitch, fmt,
+			    sx, w, h, dx, dy, alpha);
 }
 
 #define KIRIN_CURSOR_BLANK	16	/* 16x16 transparent ARGB8888 */
@@ -716,6 +666,8 @@ static void kirin_cursor_atomic_update(struct drm_plane *plane,
 	u32 sx, sy, alpha;
 	dma_addr_t addr;
 
+	if (!k->hw_on)
+		return;
 	if (!new->visible || !fb) {
 		kirin_cursor_hide(k);
 		return;
@@ -738,7 +690,10 @@ static void kirin_cursor_atomic_update(struct drm_plane *plane,
 static void kirin_cursor_atomic_disable(struct drm_plane *plane,
 					struct drm_atomic_state *state)
 {
-	kirin_cursor_hide(to_kirin(plane->dev));
+	struct kirin_dss *k = to_kirin(plane->dev);
+
+	if (k->hw_on)
+		kirin_cursor_hide(k);
 }
 
 static const struct drm_plane_helper_funcs kirin_cursor_helper_funcs = {
@@ -756,9 +711,11 @@ static void kirin_irq_mask(struct kirin_dss *k, u32 bits, bool mask)
 	u32 v;
 
 	spin_lock_irqsave(&k->irq_lock, flags);
-	v = dsi_rd(k, MIPI_LDI_CPU_ITF_INT_MSK);
-	v = mask ? v | bits : v & ~bits;
-	dsi_wr(k, MIPI_LDI_CPU_ITF_INT_MSK, v);
+	if (k->hw_on) {
+		v = dsi_rd(k, MIPI_LDI_CPU_ITF_INT_MSK);
+		v = mask ? v | bits : v & ~bits;
+		dsi_wr(k, MIPI_LDI_CPU_ITF_INT_MSK, v);
+	}
 	spin_unlock_irqrestore(&k->irq_lock, flags);
 }
 
@@ -781,13 +738,83 @@ static int kirin_crtc_atomic_check(struct drm_crtc *crtc,
 
 	if (!cs->enable)
 		return 0;
-	/* no modeset support yet: only the firmware mode */
+	/* one mode: the panel's */
 	if (!drm_mode_equal(&cs->mode, &k->fw_mode))
 		return -EINVAL;
-	/* the firmware layer can't be turned off without a modeset path */
+	/* the primary layer is never switched off while scanning out */
 	if (!(cs->plane_mask & drm_plane_mask(crtc->primary)))
 		return -EINVAL;
 	return 0;
+}
+
+/*
+ * Power the display chain up from reset, in the vendor's order: DSS (CRTC
+ * enable), bridge and panel supplies (bridge pre-enable), DSI link (encoder
+ * enable), eDP link training and stream (bridge enable). The LDI starts in
+ * the flush that programs the first frame, the backlight a few frames later.
+ */
+static void kirin_pipe_on(struct kirin_dss *k, const struct drm_display_mode *m)
+{
+	ktime_t t0 = ktime_get();
+	int ret;
+
+	mutex_lock(&k->hw_lock);
+	drm_info(&k->drm, "display on (from off level %d)\n", k->off_level);
+	ret = kirin_dss_power_on(k, k->off_level);
+	if (ret)
+		goto out;
+	kirin_dss_hw_init(k, m);
+	kirin_edp_power_on(k);
+	ret = kirin_dsi_on(k, m);
+	if (ret) {
+		kirin_edp_power_off(k);
+		kirin_dss_power_off(k, k->off_level);
+		goto out;
+	}
+	kirin_edp_enable(k);
+
+	dsi_wr(k, MIPI_LDI_CPU_ITF_INTS, ~0u);
+	dsi_wr(k, MIPI_LDI_CPU_ITF_INT_MSK, ~(u32)LDI_INT_UNFLOW);
+	k->hw_on = true;
+	k->fw_pipeline = false;
+	k->primary_setup = false;
+	k->ldi_pending = true;
+	k->power_cycles++;
+	enable_irq(k->irq);
+out:
+	mutex_unlock(&k->hw_lock);
+	if (ret)
+		drm_err(&k->drm, "display power-up failed: %d\n", ret);
+	else
+		drm_info(&k->drm, "display on after %lld ms\n", ktime_ms_delta(ktime_get(), t0));
+}
+
+/*
+ * The reverse, as the vendor's bridge disable, encoder disable, bridge
+ * post-disable and CRTC disable: backlight, eDP stream, LDI and D-PHY, panel
+ * and bridge supplies, DSS clocks and power domains.
+ */
+static void kirin_pipe_off(struct kirin_dss *k, int level)
+{
+	kirin_backlight_off(k);
+	msleep(200);	/* vendor: backlight off to video off */
+
+	mutex_lock(&k->hw_lock);
+	drm_info(&k->drm, "display off (level %d)\n", level);
+	disable_irq(k->irq);
+	cancel_work_sync(&k->recover_work);
+	kirin_edp_disable(k);
+	kirin_dsi_off(k);
+	kirin_edp_power_off(k);
+	spin_lock_irq(&k->irq_lock);
+	k->hw_on = false;
+	spin_unlock_irq(&k->irq_lock);
+	kirin_dss_power_off(k, level);
+	k->off_level = level;
+	k->ldi_pending = false;
+	k->primary_setup = false;
+	mutex_unlock(&k->hw_lock);
+	drm_info(&k->drm, "display off done\n");
 }
 
 static void kirin_crtc_atomic_enable(struct drm_crtc *crtc,
@@ -796,6 +823,9 @@ static void kirin_crtc_atomic_enable(struct drm_crtc *crtc,
 	struct kirin_dss *k = to_kirin(crtc->dev);
 	const struct drm_display_mode *m = &crtc->state->adjusted_mode;
 	unsigned long flags;
+
+	if (!k->hw_on)
+		kirin_pipe_on(k, m);
 
 	spin_lock_irqsave(&k->irq_lock, flags);
 	k->frame_ns = m->clock ? div_u64((u64)m->htotal * m->vtotal * USEC_PER_SEC,
@@ -810,20 +840,33 @@ static void kirin_crtc_atomic_disable(struct drm_crtc *crtc,
 				      struct drm_atomic_state *state)
 {
 	struct kirin_dss *k = to_kirin(crtc->dev);
+	int level = clamp(READ_ONCE(power_off), KIRIN_OFF_NONE, KIRIN_OFF_ALL);
 
-	/*
-	 * Without a modeset path the pipeline keeps running: stop fetching
-	 * from buffers that may be freed after this commit. (Hiding the OV
-	 * layer instead led to LDI underflows.)
-	 */
-	if (cursor_plane) {
-		kirin_mutex_lock(k);
-		kirin_cursor_hide(k);
-		kirin_mutex_unlock(k);
+	/* the UEFI framebuffer is only there to go back to until the first power cycle */
+	if (level == KIRIN_OFF_NONE && !k->fw_pipeline)
+		level = KIRIN_OFF_PANEL;
+
+	if (level != KIRIN_OFF_NONE) {
+		drm_crtc_vblank_off(crtc);
+		if (k->hw_on)
+			kirin_pipe_off(k, level);
+	} else if (k->hw_on) {
+		/*
+		 * Leave the pipeline running, but stop fetching from buffers
+		 * that may be freed after this commit. (Hiding the OV layer
+		 * instead led to LDI underflows.)
+		 */
+		if (cursor_plane) {
+			kirin_mutex_lock(k);
+			kirin_cursor_hide(k);
+			kirin_mutex_unlock(k);
+		}
+		kirin_rch_restore_fw(k);
+		drm_crtc_wait_one_vblank(crtc);
+		drm_crtc_vblank_off(crtc);
+	} else {
+		drm_crtc_vblank_off(crtc);
 	}
-	kirin_rch_restore_fw(k);
-	drm_crtc_wait_one_vblank(crtc);
-	drm_crtc_vblank_off(crtc);
 
 	spin_lock_irq(&crtc->dev->event_lock);
 	if (crtc->state->event) {
@@ -836,7 +879,10 @@ static void kirin_crtc_atomic_disable(struct drm_crtc *crtc,
 static void kirin_crtc_atomic_begin(struct drm_crtc *crtc,
 				    struct drm_atomic_state *state)
 {
-	kirin_mutex_lock(to_kirin(crtc->dev));
+	struct kirin_dss *k = to_kirin(crtc->dev);
+
+	if (k->hw_on)
+		kirin_mutex_lock(k);
 }
 
 /* frame statistics: how many vblanks between consecutive new primary frames */
@@ -870,14 +916,24 @@ static void kirin_crtc_atomic_flush(struct drm_crtc *crtc,
 {
 	struct kirin_dss *k = to_kirin(crtc->dev);
 	struct drm_pending_vblank_event *event = crtc->state->event;
+	bool hw_on = k->hw_on;
 
-	kirin_mutex_unlock(k);
-	kirin_count_flip(k, crtc, state);
+	if (hw_on) {
+		kirin_mutex_unlock(k);
+		if (k->ldi_pending) {
+			/* first frame after power-up is programmed: start scanning out */
+			k->ldi_pending = false;
+			kirin_ldi_enable(k);
+			kirin_backlight_on_later(k, 50);
+		} else {
+			kirin_count_flip(k, crtc, state);
+		}
+	}
 
 	if (event) {
 		crtc->state->event = NULL;
 		spin_lock_irq(&crtc->dev->event_lock);
-		if (crtc->state->active && drm_crtc_vblank_get(crtc) == 0)
+		if (hw_on && crtc->state->active && drm_crtc_vblank_get(crtc) == 0)
 			drm_crtc_arm_vblank_event(crtc, event);
 		else
 			drm_crtc_send_vblank_event(crtc, event);
@@ -1147,8 +1203,14 @@ static int kirin_state_show(struct seq_file *m, void *arg)
 	const struct kirin_rch *r = &kirin_rch[k->ch];
 	u32 l = DSS_OVL0 + OV_LAYER(k->layer);
 
+	mutex_lock(&k->hw_lock);
+	seq_printf(m, "power %s%s, power-ups %lu, eDP link failures %lu\n",
+		   k->hw_on ? "on" : "off", k->fw_pipeline ? " (UEFI pipeline)" : "",
+		   k->power_cycles, k->link_failures);
 	seq_printf(m, "rch %u layer %u underflows %u vblanks %llu\n", k->ch,
 		   k->layer, k->underflows, drm_crtc_vblank_count(&k->crtc));
+	if (!k->hw_on)
+		goto out;
 	seq_printf(m, "dma addr %08x stride %u ctrl %#x ch_ctl %#x oft %u,%u-%u,%u\n",
 		   dss_rd(k, r->dma + DMA_DATA_ADDR0), dss_rd(k, r->dma + DMA_STRIDE0) * 16,
 		   dss_rd(k, r->dma + DMA_CTRL), dss_rd(k, r->dma + DMA_CH_CTL),
@@ -1176,6 +1238,8 @@ static int kirin_state_show(struct seq_file *m, void *arg)
 	seq_printf(m, "crc glb %08x dbg %08x dispch %08x dsi %08x\n",
 		   dss_rd(k, DSS_GLB + 0x404), dss_rd(k, 0x11000),
 		   dss_rd(k, DSS_DISP_CH0 + 0x38), dsi_rd(k, 0x1a8));
+out:
+	mutex_unlock(&k->hw_lock);
 	return 0;
 }
 
@@ -1185,11 +1249,42 @@ static void kirin_report_work(struct work_struct *work)
 					   report_work.work);
 	static int runs;
 
-	kirin_crc_snapshot(k, "report");
+	mutex_lock(&k->hw_lock);
+	if (k->hw_on)
+		kirin_crc_snapshot(k, "report");
+	mutex_unlock(&k->hw_lock);
 	drm_info(&k->drm, "report: vblanks %llu underflows %u\n",
 		 drm_crtc_vblank_count(&k->crtc), k->underflows);
 	if (++runs < 4)
 		schedule_delayed_work(&k->report_work, 3 * HZ);
+}
+
+/* debugfs "kirin_dump": the DSS register ranges dumped at probe, now */
+static int kirin_dump_show(struct seq_file *m, void *arg)
+{
+	struct drm_debugfs_entry *entry = m->private;
+	struct kirin_dss *k = to_kirin(entry->dev);
+
+	mutex_lock(&k->hw_lock);
+	if (k->hw_on)
+		kirin_dump_state(k);
+	seq_printf(m, "%s (see the kernel log)\n", k->hw_on ? "dumped" : "powered off");
+	mutex_unlock(&k->hw_lock);
+	return 0;
+}
+
+/* debugfs "kirin_edp": the bridge's registers, as far as it is powered */
+static int kirin_edp_show(struct seq_file *m, void *arg)
+{
+	struct drm_debugfs_entry *entry = m->private;
+	struct kirin_dss *k = to_kirin(entry->dev);
+
+	mutex_lock(&k->hw_lock);
+	if (k->hw_on)
+		kirin_edp_dump(k);
+	seq_printf(m, "%s (see the kernel log)\n", k->hw_on ? "dumped" : "powered off");
+	mutex_unlock(&k->hw_lock);
+	return 0;
 }
 
 static int kirin_frames_show(struct seq_file *m, void *arg)
@@ -1236,7 +1331,11 @@ static void kirin_atomic_state_free(struct drm_atomic_state *state)
 	kfree(to_kirin_state(state));
 }
 
-/* up to the hardware latching the new state: the time critical part */
+/*
+ * Up to the hardware latching the new state: the time critical part. As
+ * drm_atomic_helper_commit_tail_rpm(): the CRTC is powered up before its
+ * planes are programmed, and planes of a switched-off CRTC are left alone.
+ */
 static void kirin_commit_hw(struct drm_atomic_state *state)
 {
 	struct drm_device *dev = state->dev;
@@ -1244,8 +1343,8 @@ static void kirin_commit_hw(struct drm_atomic_state *state)
 	drm_atomic_helper_wait_for_fences(dev, state, false);
 	drm_atomic_helper_wait_for_dependencies(state);
 	drm_atomic_helper_commit_modeset_disables(dev, state);
-	drm_atomic_helper_commit_planes(dev, state, 0);
 	drm_atomic_helper_commit_modeset_enables(dev, state);
+	drm_atomic_helper_commit_planes(dev, state, DRM_PLANE_COMMIT_ACTIVE_ONLY);
 	drm_atomic_helper_fake_vblank(state);
 	drm_atomic_helper_commit_hw_done(state);
 }
@@ -1443,68 +1542,57 @@ static int kirin_modeset_init(struct kirin_dss *k)
 	return 0;
 }
 
-static void kirin_regulator_disable(void *data)
-{
-	regulator_disable(data);
-}
-
 /*
- * Keep the power domains and clocks UEFI turned on for the display enabled, so
- * that they are not switched off as unused once their drivers are present.
- * Both are optional: without the clock/regulator drivers the hardware simply
- * stays as the firmware left it.
+ * Take over the pipeline UEFI lit: mode, scanout channel and layer, and a
+ * check that the DSI and bridge set-up this driver would program matches.
  */
-static int kirin_dss_claim_resources(struct kirin_dss *k)
+static int kirin_takeover(struct kirin_dss *k)
 {
-	static const char * const supplies[] = {
-		"regulator_media_subsys", "regulator_dsssubsys",
-	};
-	/* what the vendor driver keeps enabled for the DSI0 panel path */
-	static const char * const clocks[] = {
-		"aclk_dss", "pclk_dss", "clk_edc0", "clk_dss_axi_mm",
-		"clk_txdphy0_ref", "clk_txdphy0_cfg", "pclk_dsi0",
-	};
-	struct device *dev = k->drm.dev;
-	struct regulator *reg;
-	struct clk *clk;
-	unsigned int i, held = 0;
 	int ret;
 
-	for (i = 0; i < ARRAY_SIZE(supplies); i++) {
-		reg = devm_regulator_get_optional(dev, supplies[i]);
-		if (IS_ERR(reg)) {
-			if (PTR_ERR(reg) == -ENODEV)
-				continue;
-			return dev_err_probe(dev, PTR_ERR(reg), "%s\n", supplies[i]);
-		}
-		ret = regulator_enable(reg);
-		if (ret)
-			return dev_err_probe(dev, ret, "enabling %s\n", supplies[i]);
-		ret = devm_add_action_or_reset(dev, kirin_regulator_disable, reg);
-		if (ret)
-			return ret;
-	}
+	if (dump_state)
+		kirin_dump_state(k);
+	ret = kirin_read_fw_mode(k);
+	if (ret)
+		return dev_err_probe(k->drm.dev, ret, "can't read the firmware mode\n");
+	ret = kirin_find_fw_layer(k);
+	if (ret)
+		return ret;
+	kirin_dsi_check_fw(k);
+	kirin_edp_dump(k);
 
-	/*
-	 * Clocks left running by UEFI stay on with clk_ignore_unused anyway, so
-	 * a clock that can't be had is not fatal.
-	 */
-	for (i = 0; i < ARRAY_SIZE(clocks); i++) {
-		clk = devm_clk_get_optional_enabled(dev, clocks[i]);
-		if (IS_ERR(clk))
-			drm_warn(&k->drm, "clock %s: %pe\n", clocks[i], clk);
-		else if (clk)
-			held++;
-	}
-	if (held)
-		drm_info(&k->drm, "holding %u DSS clocks\n", held);
+	k->smmu_scr = dss_rd(k, DSS_SMMU + SMMU_SCR) | SMMU_SCR_GLB_BYPASS;
+	k->hw_on = true;
+	k->fw_pipeline = true;
+	k->primary_setup = true;
 	return 0;
+}
+
+/* no picture from UEFI: power down again and set up at the first enable */
+static void kirin_cold(struct kirin_dss *k)
+{
+	drm_info(&k->drm, "display not running (LDI off), will power it up from reset\n");
+	kirin_dsi_default_mode(k, &k->fw_mode);
+	k->ch = KIRIN_PRIMARY_RCH;
+	k->layer = 0;
+	k->cursor_ch = KIRIN_CURSOR_RCH;
+	k->cursor_layer = 1;
+	k->rch_ctl = KIRIN_RCH_CTL_DEFAULT;
+	k->rch_buf_ctrl = KIRIN_RCH_BUF_CTRL_DEFAULT;
+	k->rch_bitext = KIRIN_RCH_BITEXT_DEFAULT;
+	k->smmu_scr = KIRIN_SMMU_SCR_DEFAULT;
+	selftest = false;
+
+	clk_bulk_disable_unprepare(k->num_dsi_clks, k->dsi_clks);
+	kirin_dss_power_off(k, KIRIN_OFF_DSS);
+	k->off_level = KIRIN_OFF_DSS;
 }
 
 static int kirin_dss_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct kirin_dss *k;
+	bool running;
 	int ret;
 
 	k = devm_drm_dev_alloc(dev, &kirin_drm_driver, struct kirin_dss, drm);
@@ -1526,23 +1614,26 @@ static int kirin_dss_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	ret = kirin_dss_claim_resources(k);
+	/* powers and clocks the DSS as UEFI has it, so its registers can be read */
+	ret = kirin_power_init(k);
+	if (ret)
+		return ret;
+	running = dsi_rd(k, MIPI_LDI_CTRL) & LDI_EN;
+
+	ret = kirin_dsi_init(k);
+	if (ret)
+		return ret;
+	ret = kirin_edp_init(k, running);
 	if (ret)
 		return ret;
 
-	if (dump_state)
-		kirin_dump_state(k);
-
-	if (!(dsi_rd(k, MIPI_LDI_CTRL) & LDI_EN)) {
-		dev_err(dev, "display not running (LDI off); cold start not supported yet\n");
-		return -ENODEV;
+	if (running) {
+		ret = kirin_takeover(k);
+		if (ret)
+			return ret;
+	} else {
+		kirin_cold(k);
 	}
-	ret = kirin_read_fw_mode(k);
-	if (ret)
-		return dev_err_probe(dev, ret, "can't read the firmware mode\n");
-	ret = kirin_find_fw_layer(k);
-	if (ret)
-		return ret;
 
 	if (selftest)
 		kirin_selftest(k);
@@ -1554,9 +1645,12 @@ static int kirin_dss_probe(struct platform_device *pdev)
 	INIT_WORK(&k->recover_work, kirin_recover_work);
 
 	/* mask everything but vsync/underflow before hooking the interrupt */
-	dsi_wr(k, MIPI_LDI_CPU_ITF_INT_MSK, ~(u32)(LDI_INT_UNFLOW | LDI_INT_VSYNC));
-	dsi_wr(k, MIPI_LDI_CPU_ITF_INTS, ~0u);
-	ret = devm_request_irq(dev, k->irq, kirin_dss_irq, 0, "kirin-dss", k);
+	if (running) {
+		dsi_wr(k, MIPI_LDI_CPU_ITF_INT_MSK, ~(u32)(LDI_INT_UNFLOW | LDI_INT_VSYNC));
+		dsi_wr(k, MIPI_LDI_CPU_ITF_INTS, ~0u);
+	}
+	ret = devm_request_irq(dev, k->irq, kirin_dss_irq, running ? 0 : IRQF_NO_AUTOEN,
+			       "kirin-dss", k);
 	if (ret)
 		return ret;
 
@@ -1566,6 +1660,8 @@ static int kirin_dss_probe(struct platform_device *pdev)
 
 	drm_debugfs_add_file(&k->drm, "kirin_state", kirin_state_show, NULL);
 	drm_debugfs_add_file(&k->drm, "kirin_frames", kirin_frames_show, NULL);
+	drm_debugfs_add_file(&k->drm, "kirin_edp", kirin_edp_show, NULL);
+	drm_debugfs_add_file(&k->drm, "kirin_dump", kirin_dump_show, NULL);
 
 	if (rt_commit) {
 		struct kthread_worker *worker = kthread_run_worker(0, "kirin-commit");
@@ -1613,6 +1709,22 @@ static void kirin_dss_shutdown(struct platform_device *pdev)
 	drm_atomic_helper_shutdown(&k->drm);
 }
 
+static int kirin_dss_suspend(struct device *dev)
+{
+	struct kirin_dss *k = dev_get_drvdata(dev);
+
+	return drm_mode_config_helper_suspend(&k->drm);
+}
+
+static int kirin_dss_resume(struct device *dev)
+{
+	struct kirin_dss *k = dev_get_drvdata(dev);
+
+	return drm_mode_config_helper_resume(&k->drm);
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(kirin_dss_pm_ops, kirin_dss_suspend, kirin_dss_resume);
+
 static const struct of_device_id kirin_dss_of_match[] = {
 	{ .compatible = "hisilicon,kunpeng902-dpe" },
 	{ }
@@ -1626,6 +1738,7 @@ static struct platform_driver kirin_dss_driver = {
 	.driver = {
 		.name = "kirin990-dss",
 		.of_match_table = kirin_dss_of_match,
+		.pm = pm_sleep_ptr(&kirin_dss_pm_ops),
 	},
 };
 module_platform_driver(kirin_dss_driver);

@@ -2,10 +2,13 @@
 config DRM_KIRIN990
 	tristate "DRM support for the HiSilicon Kirin 990 display subsystem"
 	depends on DRM && OF && (ARM64 || COMPILE_TEST)
+	depends on I2C
+	depends on BACKLIGHT_CLASS_DEVICE
 	select DRM_CLIENT_SELECTION
 	select DRM_KMS_HELPER
 	select DRM_GEM_DMA_HELPER
 	help
 	  Display subsystem (DSS v510) of the HiSilicon Kirin 990 SoC, as used
-	  in the Huawei Qingyun L410 laptop. The DRM driver is called "kirin",
-	  so that Mesa pairs it with the Panfrost GPU driver.
+	  in the Huawei Qingyun L410 laptop, with its MIPI DSI host and the
+	  panel's SN65DSI86 DSI-to-eDP bridge. The DRM driver is called
+	  "kirin", so that Mesa pairs it with the Panfrost GPU driver.

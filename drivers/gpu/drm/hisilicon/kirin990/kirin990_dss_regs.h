@@ -42,6 +42,7 @@
 #define DSI_PHY_TST_CTRL1		0x0b8
 #define DSI_PHY_TMR_RD_CFG		0x0f4
 #define DSI_PHY_MODE			0x0fc
+#define DSI_MEM_CTRL			0x194
 /* LDI embedded in the DSI block on v510 */
 #define MIPI_LDI_CTRL			0x1b8
 #define   LDI_EN			BIT(0)
@@ -58,6 +59,7 @@
 #define   LDI_VSTATE_VBP		BIT(2)
 #define   LDI_VSTATE_VACTIVE0		BIT(3)
 #define   LDI_VSTATE_VFP		BIT(6)
+#define DSI_DPHYTX_STOPSNT		0x224
 #define DSI_DPHYTX_CTRL			0x228
 #define DSI_DPHYTX_TRSTOP_FLAG		0x22c
 #define MIPI_LDI_CPU_ITF_INTS		0x248
@@ -112,10 +114,92 @@
 #define MCTL_CTL_STATUS			0x068
 #define MCTL_CTL_DBG			0x0e0
 
+#define MCTL_CTL_CLK_SEL		0x080
+#define DSS_MCTL_CTL(n)			(0x10800 + 0x100 * (n))	/* 0-5 */
+#define MCTL_MCTL_CLK_SEL		0x1f0
+#define MCTL_MOD_CLK_SEL		0x1f8
+
 /* ---- global ---- */
 #define DSS_GLB				0x12000
 #define GLB_CPU_PDP_INTS		0x224
 #define GLB_CPU_PDP_INT_MSK		0x228
+#define GLB_MODULE_CLK_SEL		0x300
+
+/* ---- debug interrupts: RCH0-7 status/mask pairs from 0x254 ---- */
+#define DSS_DBG				0x11000
+#define DBG_MCTL_INTS			0x23c
+#define DBG_WCH0_INTS			0x244
+#define DBG_WCH1_INTS			0x24c
+#define DBG_RCH_INTS(n)			(0x254 + 8 * (n))
+#define DBG_DSS_GLB_INTS		0x294
+/* each *_INT_MSK is at the status register + 4 */
+
+#define DSS_CMDLIST_CLK_SEL		0x02740
+#define AIF_MODULE_CLK_SEL		0x0a04
+#define AIF_CLK_SEL0			0x0820
+#define AIF_CLK_SEL1			0x0824
+#define MIF_CLK_CTL			0x0508
+#define MIF_CMD_RELOAD			0x0a00	/* vendor "AIF_CMD_RELOAD" at the MIF base */
+
+/* ---- display pipe, DPP (gamma etc.), post-processing switches ---- */
+#define DISP_CH_IMG_SIZE_BEF_SR		0x000
+#define DISP_CH_IMG_SIZE_AFT_SR		0x004
+#define DISP_CH_IMG_SIZE_AFT_IFBCSW	0x008
+#define DISP_CH_DPP_INTS		0x00c
+#define DISP_CH_DPP_INT_MSK		0x010
+#define DISP_CH_CLK_SEL			0x014
+#define DSS_DISP_CH1			0xa2000
+#define DSS_HI_ACE_RAMCLK_FUNC		0x6f128
+#define DSS_DPP				0x70000
+#define DSS_DPP1			0xb0000
+#define DPP_CLK_SEL			0x020
+#define DPP_GAMA_EN			0x600
+#define DPP_GAMA_MEM_CTRL		0x604
+#define DPP_ACM_MEM_CTRL_ES		0x7a0
+#define DPP_XCC_EN			0x934
+#define DPP_DEGAMA_EN			0x950
+#define DPP_DEGAMA_MEM_CTRL		0x954
+#define DPP_GMP_EN			0x9a0
+#define DPP_GMP_MEM_CTRL		0x9a4
+#define DSS_DSC_CLK_SEL			0x7dc7c
+#define DSS_WB_CLK_SEL			0xa0018
+
+/* ---- display buffer DBUF0 ---- */
+#define DSS_DBUF0			0x6e000
+#define DBUF_FRM_SIZE			0x000
+#define DBUF_FRM_HSIZE			0x004
+#define DBUF_SRAM_VALID_NUM		0x008
+#define DBUF_THD_RQOS			0x018
+#define DBUF_THD_WQOS			0x01c
+#define DBUF_THD_CG			0x020
+#define DBUF_THD_OTHER			0x024
+#define DBUF_THD_FLUX_REQ_BEF		0x048
+#define DBUF_DFS_LP_CTRL		0x04c
+#define DBUF_CLK_SEL			0x05c
+#define DBUF_THD_FLUX_REQ_AFT		0x064
+#define DBUF_THD_DFS_OK			0x068
+#define DBUF_FLUX_REQ_CTRL		0x06c
+#define DBUF_DFS_RAM_MANAGE		0x0a8
+#define DBUF_THD_RQOS_IDLE		0x0b0
+#define DBUF_DEPTH			2560
+
+/* ---- DISP_GLB: DPP/IFBC switches, DFS ---- */
+#define DSS_DISP_GLB			0xa1000
+#define DPPSW_SIG_CTRL			0x000
+#define DPPSW_DAT_CTRL			0x004
+#define IFBCSW_SIG_CTRL			0x008
+#define IFBCSW_DAT_CTRL			0x00c
+#define DYN_SW_DEFAULT			0x020
+#define DSS_DFS_OK_MASK			0x02c
+#define MODULE_CORE_CLK_SEL		0x034
+
+/* ---- pipe switch to DSI0 ---- */
+#define DSS_PIPE_SW_DSI0		0xbe000
+#define PIPE_SW_SIG_CTRL		0x010
+#define SW_POS_CTRL_SIG_EN		0x014
+#define PIPE_SW_DAT_CTRL		0x018
+#define SW_POS_CTRL_DAT_EN		0x01c
+#define PIPE_SW_CLK_SEL			0x024
 
 /* ---- read channel blocks (relative to the channel's DMA base) ---- */
 #define DMA_OFT_X0			0x000
@@ -136,6 +220,8 @@
 #define DMA_CH_RD_SHADOW		0x0d0
 #define DMA_CH_CTL			0x0d4
 #define   CH_CTL_EN			BIT(0)
+#define DMA_CH_CLK_SEL			0x0e0
+#define DMA_FBCD_CTRL_GATE		0x98c
 #define DFC_BASE			0x100
 #define DFC_DISP_SIZE			0x000
 #define DFC_PIX_IN_NUM			0x004
@@ -181,8 +267,18 @@
 #define OV_LAYER_PSPOS			0x2c
 #define OV_LAYER_PEPOS			0x30
 #define OV_NUM_LAYERS			8
+#define OV8_CLK_SEL			0x348
 #define OV8_BLOCK_SIZE			0x350
+#define OV8_BLOCK_DBG			0x354
 #define OV8_REG_DEFAULT			0x358
+#define DSS_OVL2			0x60800
+#define DSS_OVL3			0x60c00
+#define OV2_CLK_SEL			0x208
+
+/* OV layer blending (vendor g_ovl_alpha): opaque source, premultiplied over */
+#define OV_ALPHA_OPAQUE			0x01004000
+#define OV_ALPHA_PREMULT_OVER		0xc2004000
+#define OV_ALPHA_A_OPAQUE		0x03ff03ff
 
 /* ---- display pipe front (DPP input, DISP_CH0) ---- */
 #define DSS_DISP_CH0			0x62000
@@ -191,6 +287,8 @@
 #define DSS_SMMU			0x80000
 #define SMMU_SCR			0x000
 #define   SMMU_SCR_GLB_BYPASS		BIT(0)
+#define SMMU_LP_CTRL			0x008
+#define SMMU_CB_TTBCR			0x20c
 #define SMMU_SMRX_NS(n)			(0x020 + 4 * (n))
 #define   SMMU_SMR_BYPASS		BIT(0)
 
