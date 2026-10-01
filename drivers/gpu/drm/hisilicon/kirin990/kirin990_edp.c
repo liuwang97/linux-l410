@@ -26,6 +26,9 @@
 #include <linux/of.h>
 
 #include <drm/display/drm_dp.h>
+#include <drm/display/drm_dp_helper.h>
+#include <drm/drm_edid.h>
+#include <drm/drm_managed.h>
 #include <drm/drm_print.h>
 
 #include "kirin990_drv.h"
@@ -138,14 +141,28 @@ static int sn_wait_training(struct kirin_dss *k)
 	return -ETIMEDOUT;
 }
 
-/* native AUX transfer of up to 16 bytes to/from the panel's DPCD */
-static int sn_aux(struct kirin_dss *k, u8 request, u32 addr, u8 *buf, unsigned int len)
+/*
+ * One AUX transaction of up to 16 bytes, native (DPCD) or I2C-over-AUX
+ * (the panel's EDID), as mainline ti_sn_aux_transfer(): returns the number
+ * of bytes transferred and the sink's reply.
+ */
+static ssize_t sn_aux_xfer(struct kirin_dss *k, u8 request, u32 addr, u8 *buf,
+			   unsigned int len, u8 *reply)
 {
+	u8 type = request & ~(DP_AUX_I2C_MOT | DP_AUX_I2C_WRITE_STATUS_UPDATE);
+	bool write = type == DP_AUX_NATIVE_WRITE || type == DP_AUX_I2C_WRITE;
 	unsigned int i;
 	int st;
 
+	if (len > 16)
+		return -EINVAL;
+	if (type != DP_AUX_NATIVE_WRITE && type != DP_AUX_I2C_WRITE &&
+	    type != DP_AUX_NATIVE_READ && type != DP_AUX_I2C_READ)
+		return -EINVAL;
+
+	*reply = DP_AUX_NATIVE_REPLY_ACK;
 	sn_write(k, SN_AUX_CMD_STATUS, AUX_RPLY_TOUT | AUX_SHORT | AUX_NAT_I2C_FAIL);
-	if (request == DP_AUX_NATIVE_WRITE)
+	if (write)
 		for (i = 0; i < len; i++)
 			sn_write(k, SN_AUX_WDATA(i), buf[i]);
 	sn_write(k, SN_AUX_ADDR_19_16, (addr >> 16) & 0xf);
@@ -158,9 +175,20 @@ static int sn_aux(struct kirin_dss *k, u8 request, u32 addr, u8 *buf, unsigned i
 	st = sn_read(k, SN_AUX_CMD_STATUS);
 	if (st < 0)
 		return st;
-	if (st & (AUX_RPLY_TOUT | AUX_SHORT | AUX_NAT_I2C_FAIL))
-		return -EIO;
-	if (request == DP_AUX_NATIVE_READ) {
+	/* the bridge retries seven times itself and handles defers */
+	if (st & AUX_RPLY_TOUT)
+		return -ETIMEDOUT;
+	if (st & AUX_SHORT) {
+		st = sn_read(k, SN_AUX_LENGTH);
+		if (st < 0)
+			return st;
+		len = min_t(unsigned int, len, st);
+	} else if (st & AUX_NAT_I2C_FAIL) {
+		*reply = type == DP_AUX_I2C_READ || type == DP_AUX_I2C_WRITE ?
+			 DP_AUX_I2C_REPLY_NACK : DP_AUX_NATIVE_REPLY_NACK;
+		return 0;
+	}
+	if (!write) {
 		for (i = 0; i < len; i++) {
 			st = sn_read(k, SN_AUX_RDATA(i));
 			if (st < 0)
@@ -168,7 +196,62 @@ static int sn_aux(struct kirin_dss *k, u8 request, u32 addr, u8 *buf, unsigned i
 			buf[i] = st;
 		}
 	}
-	return 0;
+	return len;
+}
+
+/* whole native AUX transfer, 0 or an error */
+static int sn_aux(struct kirin_dss *k, u8 request, u32 addr, u8 *buf, unsigned int len)
+{
+	u8 reply;
+	ssize_t ret = sn_aux_xfer(k, request, addr, buf, len, &reply);
+
+	if (ret < 0)
+		return ret;
+	return reply == DP_AUX_NATIVE_REPLY_ACK && ret == len ? 0 : -EIO;
+}
+
+/* drm_dp_aux transfer, for DDC (EDID) over the bridge's AUX channel */
+static ssize_t kirin_aux_transfer(struct drm_dp_aux *aux, struct drm_dp_aux_msg *msg)
+{
+	struct kirin_dss *k = container_of(aux, struct kirin_dss, aux);
+
+	if (!k->bridge)
+		return -ENODEV;
+	return sn_aux_xfer(k, msg->request, msg->address, msg->buffer, msg->size,
+			   &msg->reply);
+}
+
+/*
+ * Read the panel's EDID once, for the connector's physical size and identity
+ * (applied in get_modes(); the mode stays the one UEFI programmed). The
+ * bridge must be powered.
+ */
+void kirin_edp_read_edid(struct kirin_dss *k)
+{
+	const struct drm_edid *edid;
+	const struct edid *raw;
+	char name[16] = "?";
+
+	if (!k->bridge || k->edid_tried)
+		return;
+	k->edid_tried = true;
+	edid = drm_edid_read_ddc(&k->connector, &k->aux.ddc);
+	if (!edid) {
+		drm_warn(&k->drm, "no EDID from the panel\n");
+		return;
+	}
+	raw = drm_edid_raw(edid);
+	drm_edid_get_monitor_name(raw, name, sizeof(name));
+	drm_info(&k->drm, "panel EDID: %s, %u x %u cm image size\n", name,
+		 raw->width_cm, raw->height_cm);
+	WRITE_ONCE(k->edid, edid);
+}
+
+static void kirin_edid_free(struct drm_device *drm, void *data)
+{
+	struct kirin_dss *k = data;
+
+	drm_edid_free(k->edid);
 }
 
 static void sn_aux_write(struct kirin_dss *k, u32 addr, u8 val)
@@ -478,5 +561,12 @@ int kirin_edp_init(struct kirin_dss *k, bool running)
 	}
 	k->bridge_refclk = clk;
 	k->bridge = client;
-	return 0;
+
+	/* DDC over AUX for the EDID; not registered: nothing else may use it while the panel is off */
+	k->aux.name = "SN65DSI86 AUX";
+	k->aux.dev = dev;
+	k->aux.drm_dev = &k->drm;
+	k->aux.transfer = kirin_aux_transfer;
+	drm_dp_aux_init(&k->aux);
+	return drmm_add_action_or_reset(&k->drm, kirin_edid_free, k);
 }

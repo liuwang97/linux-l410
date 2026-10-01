@@ -5,6 +5,8 @@ config DRM_KIRIN990
 	depends on I2C
 	depends on BACKLIGHT_CLASS_DEVICE
 	select DRM_CLIENT_SELECTION
+	select DRM_DISPLAY_DP_HELPER
+	select DRM_DISPLAY_HELPER
 	select DRM_KMS_HELPER
 	select DRM_GEM_DMA_HELPER
 	help

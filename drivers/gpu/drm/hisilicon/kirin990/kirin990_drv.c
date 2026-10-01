@@ -772,6 +772,7 @@ static void kirin_pipe_on(struct kirin_dss *k, const struct drm_display_mode *m)
 		goto out;
 	}
 	kirin_edp_enable(k);
+	kirin_edp_read_edid(k);		/* cold start: not read at probe */
 
 	dsi_wr(k, MIPI_LDI_CPU_ITF_INTS, ~0u);
 	dsi_wr(k, MIPI_LDI_CPU_ITF_INT_MSK, ~(u32)LDI_INT_UNFLOW);
@@ -1098,8 +1099,12 @@ static void kirin_recover_work(struct work_struct *work)
 static int kirin_connector_get_modes(struct drm_connector *connector)
 {
 	struct kirin_dss *k = to_kirin(connector->dev);
+	const struct drm_edid *edid = READ_ONCE(k->edid);
 	struct drm_display_mode *mode;
 
+	/* size and identity from the panel's EDID, the mode from the running pipeline */
+	if (edid)
+		drm_edid_connector_update(connector, edid);
 	mode = drm_mode_duplicate(connector->dev, &k->fw_mode);
 	if (!mode)
 		return 0;
@@ -1641,6 +1646,8 @@ static int kirin_dss_probe(struct platform_device *pdev)
 	ret = kirin_modeset_init(k);
 	if (ret)
 		return ret;
+	if (running)
+		kirin_edp_read_edid(k);
 
 	INIT_WORK(&k->recover_work, kirin_recover_work);
 

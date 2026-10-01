@@ -12,6 +12,7 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
+#include <drm/display/drm_dp_helper.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_device.h>
@@ -158,6 +159,9 @@ struct kirin_dss {
 	struct backlight_device *backlight;
 	struct delayed_work backlight_work;
 	ktime_t panel_off_time;
+	struct drm_dp_aux aux;		/* DDC over the bridge's AUX channel */
+	const struct drm_edid *edid;	/* the panel's, applied in get_modes() */
+	bool edid_tried;
 };
 
 #define to_kirin(x) container_of(x, struct kirin_dss, drm)
@@ -213,6 +217,7 @@ void kirin_dsi_default_mode(struct kirin_dss *k, struct drm_display_mode *mode);
 /* kirin990_edp.c */
 int kirin_edp_init(struct kirin_dss *k, bool running);
 void kirin_edp_dump(struct kirin_dss *k);
+void kirin_edp_read_edid(struct kirin_dss *k);
 void kirin_edp_power_on(struct kirin_dss *k);
 int kirin_edp_enable(struct kirin_dss *k);
 void kirin_edp_disable(struct kirin_dss *k);
