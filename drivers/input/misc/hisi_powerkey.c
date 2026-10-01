@@ -15,6 +15,7 @@
  */
 
 #include <linux/platform_device.h>
+#include <linux/pm_wakeirq.h>
 #include <linux/interrupt.h>
 #include <linux/reboot.h>
 #include <linux/kernel.h>
@@ -48,6 +49,23 @@ static irqreturn_t hi65xx_power_release_isr(int irq, void *q)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Kirin 990 laptops (Huawei L410) only have the "down" interrupt: report a
+ * complete click when the key goes down, like the vendor kernel does.
+ */
+static irqreturn_t hi65xx_power_click_isr(int irq, void *q)
+{
+	struct input_dev *input = q;
+
+	pm_wakeup_event(input->dev.parent, MAX_HELD_TIME);
+	input_report_key(input, KEY_POWER, 1);
+	input_sync(input);
+	input_report_key(input, KEY_POWER, 0);
+	input_sync(input);
+
+	return IRQ_HANDLED;
+}
+
 static irqreturn_t hi65xx_restart_toggle_isr(int irq, void *q)
 {
 	struct input_dev *input = q;
@@ -72,8 +90,10 @@ static const struct {
 static int hi65xx_powerkey_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	irqreturn_t (*handler)(int irq, void *q);
 	struct input_dev *input;
 	int irq, i, error;
+	bool has_up;
 
 	input = devm_input_allocate_device(dev);
 	if (!input) {
@@ -87,14 +107,27 @@ static int hi65xx_powerkey_probe(struct platform_device *pdev)
 	input_set_capability(input, EV_KEY, KEY_POWER);
 	input_set_capability(input, EV_KEY, KEY_RESTART);
 
+	irq = platform_get_irq_byname_optional(pdev, "up");
+	if (irq == -EPROBE_DEFER)
+		return irq;
+	has_up = irq >= 0;
+
 	for (i = 0; i < ARRAY_SIZE(hi65xx_irq_info); i++) {
+		handler = hi65xx_irq_info[i].handler;
 
-		irq = platform_get_irq_byname(pdev, hi65xx_irq_info[i].name);
-		if (irq < 0)
-			return irq;
+		/* only "down" is mandatory */
+		irq = platform_get_irq_byname_optional(pdev, hi65xx_irq_info[i].name);
+		if (irq < 0) {
+			if (i == 0 || irq == -EPROBE_DEFER)
+				return dev_err_probe(dev, irq, "no %s interrupt\n",
+						     hi65xx_irq_info[i].name);
+			continue;
+		}
 
-		error = devm_request_any_context_irq(dev, irq,
-						     hi65xx_irq_info[i].handler,
+		if (handler == hi65xx_power_press_isr && !has_up)
+			handler = hi65xx_power_click_isr;
+
+		error = devm_request_any_context_irq(dev, irq, handler,
 						     IRQF_ONESHOT,
 						     hi65xx_irq_info[i].name,
 						     input);
@@ -112,13 +145,24 @@ static int hi65xx_powerkey_probe(struct platform_device *pdev)
 	}
 
 	device_init_wakeup(dev, 1);
+	/* pressing the key wakes the system from sleep */
+	error = devm_pm_set_wake_irq(dev, platform_get_irq_byname(pdev, "down"));
+	if (error)
+		dev_warn(dev, "power key cannot wake the system: %d\n", error);
 
 	return 0;
 }
 
+static const struct of_device_id hi65xx_powerkey_of_match[] = {
+	{ .compatible = "hisilicon-hisi-powerkey" },	/* Kirin 990 firmware DT */
+	{ }
+};
+MODULE_DEVICE_TABLE(of, hi65xx_powerkey_of_match);
+
 static struct platform_driver hi65xx_powerkey_driver = {
 	.driver = {
 		.name = "hi65xx-powerkey",
+		.of_match_table = hi65xx_powerkey_of_match,
 	},
 	.probe = hi65xx_powerkey_probe,
 };
