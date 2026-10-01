@@ -8,6 +8,16 @@ menuconfig HWSPINLOCK
 
 if HWSPINLOCK
 
+config HWSPINLOCK_KIRIN
+	bool "HiSilicon Kirin Hardware Spinlock device"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on OF
+	help
+	  Say y here to support the hardware spinlocks of HiSilicon Kirin
+	  970/980/990 SoCs, shared with the LPM3 and sensor hub firmware.
+
+	  If unsure, say N.
+
 config HWSPINLOCK_OMAP
 	tristate "OMAP Hardware Spinlock device"
 	depends on ARCH_OMAP4 || SOC_OMAP5 || SOC_DRA7XX || SOC_AM33XX || SOC_AM43XX || ARCH_K3 || COMPILE_TEST
