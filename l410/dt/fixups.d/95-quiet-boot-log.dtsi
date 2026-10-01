@@ -1,0 +1,47 @@
+// Nodes and properties of the firmware DT that only put error lines in the boot log on
+// 6.18 (dmesg --level=err). None of them has a user here; nothing changes but the log.
+
+// Vendor-style GPIO properties that point at pinmux/clock nodes ("could not get #gpio-cells"
+// from fw_devlink). hisilicon,pd and hisilicon,fastboot have no driver in this kernel.
+&{/pddevice} {
+	/delete-property/ irq-gpio;
+};
+
+&{/fastboot} {
+	/delete-property/ gpio-keyup;
+	/delete-property/ gpio-keydown;
+	/delete-property/ i2c-sel0-gpio;
+	/delete-property/ i2c-sel1-gpio;
+};
+
+// SPI placeholders at chip selects 0x31-0x33 on a controller with num-cs = 1
+// ("cs1 >= max 1", "spi_device register error")
+&{/amba/spi@fa89f000/spi_dev31@31} {
+	status = "disabled";
+};
+
+&{/amba/spi@fa89f000/spi_dev32@32} {
+	status = "disabled";
+};
+
+&{/amba/spi@fa89f000/spi_dev33@33} {
+	status = "disabled";
+};
+
+// LM36923 backlight driver chip: the L410 backlight is the platform "backlight" device; the
+// node has no LED child, so lm3692x fails its probe ("No LED Child node")
+&{/amba/i2c@FA04D000/ti,lm36923} {
+	status = "disabled";
+};
+
+// TAS2562: the driver's defaults written out (I-sense slot 0, V-sense slot 2); a missing
+// ti,imon-slot-no is logged at error level
+&{/amba/i2c@FA04C000/smartpa@4C} {
+	ti,imon-slot-no = <0>;
+	ti,vmon-slot-no = <2>;
+};
+
+&{/amba/i2c@FA04C000/smartpa@4E} {
+	ti,imon-slot-no = <0>;
+	ti,vmon-slot-no = <2>;
+};
