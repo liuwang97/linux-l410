@@ -5230,7 +5230,8 @@ uint32_t wal_cfg80211_init(void)
             /* wifi 驱动上报支持FW_ROAM,关联时(cfg80211_connect)候使用bssid_hint 替代bssid。 */
             pst_wiphy->flags |= WIPHY_FLAG_SUPPORTS_FW_ROAM;
 #ifdef _PRE_WLAN_FEATURE_DFS_OFFLOAD
-            pst_wiphy->flags |= 0x200;
+            /* 0x200 was the vendor kernel's DFS-offload flag; upstream uses an ext feature (bit 9 is now DISABLE_WEXT) */
+            wiphy_ext_feature_set(pst_wiphy, NL80211_EXT_FEATURE_DFS_OFFLOAD);
 #endif
 
             /* linux 3.14 版本升级，管制域重新修改 */

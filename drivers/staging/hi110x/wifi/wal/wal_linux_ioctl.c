@@ -2772,6 +2772,56 @@ OAL_STATIC void wal_regdomain_fill_info(const oal_ieee80211_regdomain_stru *pst_
 }
 
 
+/*
+ * wiphy_apply_custom_regulatory() takes the RTNL and the wiphy lock on current kernels.
+ * The country code is (re)programmed from the first power-on calibration, which
+ * ndo_open may be waiting for with the RTNL held, so the kernel side of the update
+ * (reset bands, apply, save bands) runs from an ordered work item.
+ */
+struct wal_regdom_work {
+    struct work_struct work;
+    uint8_t dev_id;
+    oal_wiphy_stru *wiphy;
+    const oal_ieee80211_regdomain_stru *regdom;
+};
+
+static struct workqueue_struct *g_wal_regdom_wq;
+static DEFINE_MUTEX(g_wal_regdom_wq_lock);
+
+static void wal_regdom_apply_work(struct work_struct *work)
+{
+    struct wal_regdom_work *w = container_of(work, struct wal_regdom_work, work);
+
+    wal_cfg80211_reset_bands(w->dev_id);
+    oal_wiphy_apply_custom_regulatory(w->wiphy, w->regdom);
+    wal_cfg80211_save_bands(w->dev_id);
+    kfree(w);
+}
+
+static void wal_regdom_apply_async(uint8_t dev_id, oal_wiphy_stru *wiphy,
+                                   const oal_ieee80211_regdomain_stru *regdom)
+{
+    struct wal_regdom_work *w = NULL;
+
+    mutex_lock(&g_wal_regdom_wq_lock);
+    if (g_wal_regdom_wq == NULL) {
+        g_wal_regdom_wq = alloc_ordered_workqueue("hi110x_regdom", 0);
+    }
+    mutex_unlock(&g_wal_regdom_wq_lock);
+
+    w = kzalloc(sizeof(*w), GFP_KERNEL);
+    if ((w == NULL) || (g_wal_regdom_wq == NULL)) {
+        kfree(w);
+        oam_error_log0(0, OAM_SF_ANY, "{wal_regdom_apply_async::no memory, kernel regdom not updated}");
+        return;
+    }
+    INIT_WORK(&w->work, wal_regdom_apply_work);
+    w->dev_id = dev_id;
+    w->wiphy = wiphy;
+    w->regdom = regdom; /* points into the static regdb tables */
+    queue_work(g_wal_regdom_wq, &w->work);
+}
+
 int32_t wal_regdomain_update(oal_net_device_stru *net_dev, int8_t *pc_country)
 {
     uint8_t uc_dev_id;
@@ -2879,10 +2929,7 @@ int32_t wal_regdomain_update(oal_net_device_stru *net_dev, int8_t *pc_country)
 
         oam_warning_log0(0, OAM_SF_ANY, "{wal_regdomain_update::update regdom to kernel.}");
 
-        wal_cfg80211_reset_bands(uc_dev_id);
-        oal_wiphy_apply_custom_regulatory(pst_device->pst_wiphy, pst_regdom);
-        
-        wal_cfg80211_save_bands(uc_dev_id);
+        wal_regdom_apply_async(uc_dev_id, pst_device->pst_wiphy, pst_regdom);
     }
     return OAL_SUCC;
 }
@@ -2951,10 +2998,7 @@ OAL_STATIC void wal_regdomain_update_hostapd_param(const oal_ieee80211_regdomain
 
         oam_warning_log0(0, OAM_SF_ANY, "{wal_regdomain_update_hostapd_param::update regdom to kernel.}");
 
-        wal_cfg80211_reset_bands(uc_dev_id);
-        oal_wiphy_apply_custom_regulatory(pst_device->pst_wiphy, pst_regdom);
-        
-        wal_cfg80211_save_bands(uc_dev_id);
+        wal_regdom_apply_async(uc_dev_id, pst_device->pst_wiphy, pst_regdom);
     }
 }
 
