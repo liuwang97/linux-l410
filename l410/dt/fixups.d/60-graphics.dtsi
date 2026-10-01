@@ -1,0 +1,107 @@
+// T6 graphics: Kirin 990 display subsystem and Mali-G76 GPU.
+
+// Display: kirin990-dss (DRM "kirin") takes over the pipeline UEFI lit and
+// scans out physically contiguous buffers with the DSS-internal SMMU bypassed;
+// the vendor "hisi,hisi-smmu-lpae" software IOMMU has no driver.
+&{/dpe@E8400000} {
+	/delete-property/ iommus;
+	// the DSS domain's supply, so kirin990_drm.power_off=3 can leave it on
+	regulator_vivobus-supply = <&{/regulator_ip@0xFFF05000/ip@0}>;
+
+	// Panel power chain for full modesets (kirin990_edp.c). The firmware
+	// DT's SN65DSI86 node has product_type 3, the vendor's "laptop UA"
+	// board (laptop_bridge.c): bridge 1.2 V / 1.8 V, bridge EN and panel
+	// VDD are SoC GPIOs (soc_gpio_1v2_en 0x69, soc_gpio_1v8_en 0x2f,
+	// chip_reset 0xce, lcd_vdd_enable_gpio 0x1c); the bridge refclk is its
+	// clk_nfc. The EC's EC_1V2_EN / EC_DSI_VCCIO_ON switches belong to the
+	// "laptop U" board and have no user here. Plain dtc: GPIO_ACTIVE_HIGH = 0.
+	hisilicon,edp-bridge = <&{/amba/i2c@FA04D000/ti,sn65dsix6@2c}>;
+	bridge-1v2-gpios = <&{/amba/gpio@fe00f000} 1 0>;	/* GPIO_105 */
+	bridge-1v8-gpios = <&{/amba/gpio@fe007000} 7 0>;	/* GPIO_047 */
+	bridge-enable-gpios = <&{/amba/gpio@fa8ad000} 6 0>;	/* GPIO_206 */
+	panel-vdd-gpios = <&{/amba/gpio@fe005000} 4 0>;	/* GPIO_028 */
+	backlight = <&backlight>;
+};
+
+// Backlight: the SoC's BLPWM output (GPIO_161, function 1) drives the panel
+// backlight PWM input, GPIO_027 is the backlight enable (BL_EN).
+//
+// Use the vendor kernel's PWM period, not the 26.7 us UEFI programs: the
+// vendor sets DIV 0x37 with 800 counts of the 90 MHz clock (497.8 us, 2 kHz).
+// Its lowest non-zero setting is 2/800 = 0.25 % duty, a 1.24 us pulse
+// (laptop_bridge.c: bl_min = max / 90, mapped through level_map[]). Anything
+// shorter can leave the panel completely black, so level 1 is that floor and
+// levels 1..100 follow CIE 1931 lightness up to 100 %; 0 turns the backlight
+// off. Levels are in units of 1/10000 of the period.
+&{/panel_blpwm} {
+	#pwm-cells = <3>;
+};
+
+/ {
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&{/panel_blpwm} 0 497778 0>;
+		enable-gpios = <&{/amba/gpio@fe005000} 3 0>;	/* GPIO_027 BL_EN */
+		post-pwm-on-delay-ms = <20>;
+		pwm-off-delay-ms = <20>;
+		brightness-levels = <0
+			   25    36    47    58    69    80    91   102   115   128
+			  143   158   175   193   212   232   253   276   300   325
+			  352   380   409   440   473   507   543   581   620   660
+			  703   747   794   842   892   944   998  1054  1112  1172
+			 1234  1298  1365  1434  1505  1578  1654  1732  1813  1896
+			 1981  2069  2160  2253  2349  2447  2549  2653  2760  2869
+			 2982  3097  3215  3337  3461  3589  3719  3853  3989  4129
+			 4273  4419  4569  4722  4879  5039  5202  5369  5539  5713
+			 5891  6072  6257  6446  6638  6834  7034  7238  7446  7658
+			 7874  8093  8317  8545  8777  9013  9253  9498  9747 10000>;
+		default-brightness-level = <50>;	/* 19 % duty */
+	};
+};
+
+// Mali-G76 MP16 -> Panfrost. The vendor node is written for kbase
+// ("arm,mali-midgard", upper-case interrupt names, gpu-supply, a v1 OPP table
+// with voltages that are really LPM3 DVFS levels).
+&{/mali@FE140000} {
+	compatible = "hisilicon,kirin990-mali", "arm,mali-bifrost";
+	interrupt-names = "job", "mmu", "gpu";
+	// GPU subsystem power goes through LPM3 (ip-regulator-lpm "g3d")
+	mali-supply = <&{/regulator_ip@0xFFF05000/ip@13}>;
+	// RAM deep-sleep / striping glue, see panfrost_gpu_hisi_kirin990_quirk()
+	hisilicon,pctrl = <&{/pctrl@fe02e000}>;
+	// system-coherency = 31 is kbase's COHERENCY_NONE: not dma-coherent
+	/delete-property/ system-coherency;
+	/delete-property/ gpu_outstanding;
+	/delete-property/ last-buffer;
+	/delete-property/ physical-memory-group-manager;
+	// LPM3 sets the voltage for each frequency itself: frequencies only
+	/delete-property/ operating-points;
+	operating-points-v2 = <&gpu_opp_table>;
+};
+
+// GPU DVFS goes through the PMCTRL hardware vote (vendor
+// CONFIG_HISI_HW_VOTE_GPU_FREQ); LPM3 ignores the IPC rate request.
+&{/clocks@0/clk_pmctrl@0xFFF01000/clk_g3d} {
+	hisilicon,hw-vote-channel = "gpu-freq", "vote-src-1";
+};
+
+/ {
+	gpu_opp_table: opp-table-gpu {
+		compatible = "operating-points-v2";
+
+		opp-166000000 { opp-hz = /bits/ 64 <166000000>; };
+		opp-185000000 { opp-hz = /bits/ 64 <185000000>; };
+		opp-208000000 { opp-hz = /bits/ 64 <208000000>; };
+		opp-230000000 { opp-hz = /bits/ 64 <230000000>; };
+		opp-253000000 { opp-hz = /bits/ 64 <253000000>; };
+		opp-277000000 { opp-hz = /bits/ 64 <277000000>; };
+		opp-304000000 { opp-hz = /bits/ 64 <304000000>; };
+		opp-332000000 { opp-hz = /bits/ 64 <332000000>; };
+		opp-375000000 { opp-hz = /bits/ 64 <375000000>; };
+		opp-418000000 { opp-hz = /bits/ 64 <418000000>; };
+		opp-461000000 { opp-hz = /bits/ 64 <461000000>; };
+		opp-509000000 { opp-hz = /bits/ 64 <509000000>; };
+		opp-557000000 { opp-hz = /bits/ 64 <557000000>; };
+		opp-600000000 { opp-hz = /bits/ 64 <600000000>; };
+	};
+};
