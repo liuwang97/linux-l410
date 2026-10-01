@@ -1,0 +1,73 @@
+// T8 audio: Hi6405 codec (SSI registers, SLIMbus data), ASP DMA PCM,
+// TAS2562 speaker amplifiers. Phandles are the firmware DT's own.
+
+// HiFi DSP data carve-out. The ASP DMA masters only reach this area; the
+// vendor PCM driver keeps its ping-pong buffers and LLIs at +0x164000.
+&{/reserved-memory} {
+	audio_hifi_data: hifi-data@26780000 {
+		reg = <0x0 0x26780000 0x0 0x580000>;
+		no-map;
+	};
+};
+
+// Codec controller: take over the SSI window's clock and pins from the
+// separate "codecssi" node (same register range), describe the reset line.
+&{/codec_controller@e82b9000} {
+	clocks = <0x51e>, <0x505>;		/* clk_codecssi, clk_pmuaudioclk */
+	clock-names = "clk_codecssi", "clk_pmuaudioclk";
+	reset-gpios = <&{/amba/gpio@fa8ac000} 6 1>;	/* GPIO 198, active low */
+	pinctrl-names = "default", "idle";
+	pinctrl-0 = <0x454 0x495 0x48f 0x44e>;	/* codec irq GPIO200, SSI GPIO197 */
+	pinctrl-1 = <0x455 0x496 0x490 0x44f>;
+};
+
+// Headset type (CTIA/OMTP) switch lines, vendor "hs_ctrl_gpio_cfg" GPIOs 22 and 24
+&{/codec_controller@e82b9000/hi64xx_irq@0/hi6405_codec@0} {
+	hs-type-gpios = <&{/amba/gpio@fe004000} 6 0>, <&{/amba/gpio@fe005000} 0 0>;
+};
+
+&{/codecssi} {
+	status = "disabled";
+};
+
+// Cadence SLIMbus manager in the ASP
+&{/slimbusmisc} {
+	clocks = <0x505>, <0x511>;		/* clk_pmuaudioclk, clk_asp_subsys */
+	clock-names = "clk_pmuaudioclk", "clk_asp_subsys";
+};
+
+// ASP DMA + PCM (replaces the vendor pcm-codec / armpc-custom / slimbus-dai trio)
+&{/hi64xx_asp_dmac@fa54B000} {
+	memory-region = <&audio_hifi_data>;
+	clocks = <0x511>;			/* clk_asp_subsys */
+	clock-names = "clk_asp_subsys";
+	#sound-dai-cells = <0>;
+};
+
+// TAS2562 amplifiers on I2C3 (vendor drove them from user space)
+&{/amba/i2c@FA04C000/smartpa@4C} {
+	compatible = "ti,tas2562";
+	#sound-dai-cells = <0>;
+	sound-name-prefix = "Left";
+	shutdown-gpios = <&{/amba/gpio@fa8b2000} 1 0>;	/* GPIO 241, shared */
+	/delete-node/ hw_reset;
+	/delete-node/ irq_handler;
+	/delete-node/ regmap_cfg;
+};
+
+&{/amba/i2c@FA04C000/smartpa@4E} {
+	compatible = "ti,tas2562";
+	#sound-dai-cells = <0>;
+	sound-name-prefix = "Right";
+	/delete-node/ hw_reset;
+	/delete-node/ irq_handler;
+	/delete-node/ regmap_cfg;
+};
+
+&{/sound_hi6405} {
+	model = "HUAWEI L410";
+	hisilicon,asp-pcm = <&{/hi64xx_asp_dmac@fa54B000}>;
+	hisilicon,codec = <&{/codec_controller@e82b9000/hi64xx_irq@0/hi6405_codec@0}>;
+	hisilicon,speaker-amps = <&{/amba/i2c@FA04C000/smartpa@4C}>,
+				 <&{/amba/i2c@FA04C000/smartpa@4E}>;
+};
