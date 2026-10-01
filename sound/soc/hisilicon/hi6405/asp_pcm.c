@@ -17,6 +17,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -27,6 +28,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
+#include <linux/seq_file.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -60,6 +62,12 @@
 #define DMA_CX_SRC(c)		(0x814 + 0x40 * (c))
 #define DMA_CX_DES(c)		(0x818 + 0x40 * (c))
 #define DMA_CX_CONFIG(c)	(0x81c + 0x40 * (c))
+#define DMA_CX_AXI_CONF(c)	(0x820 + 0x40 * (c))
+#define DMA_CX_CURR_CNT0(c)	(0x704 + 0x10 * (c))
+#define DMA_CX_CURR_SRC(c)	(0x708 + 0x10 * (c))
+#define DMA_CX_CURR_DES(c)	(0x70c + 0x10 * (c))
+#define DMA_CH_PRI		0x688
+#define DMA_CTRL		0x698
 #define DMA_CH_ENABLE		BIT(0)
 #define DMA_LLI_LINK		0x2
 #define DMA_NR_CHANNELS		16
@@ -142,6 +150,7 @@ struct asp_pcm {
 	unsigned int users;		/* open substreams (ASP powered and clocked) */
 	int irq;
 	struct asp_stream streams[2];
+	void __iomem *cfg;		/* ASP_CFG (read-only here, for diagnostics) */
 };
 
 static void dma_update_bits(struct asp_pcm *asp, u32 reg, u32 mask, u32 val)
@@ -347,6 +356,38 @@ static void asp_stream_period(struct asp_stream *s)
 	}
 }
 
+/* what a failing channel was doing, and the LLI ring we wrote for it (asp->lock held) */
+static void asp_dump_err_channels(struct asp_pcm *asp, u32 err)
+{
+	static DEFINE_RATELIMIT_STATE(rs, 10 * HZ, 4);
+	int i, p;
+
+	if (!__ratelimit(&rs))
+		return;
+	dev_err(asp->dev, "dma: ch_stat %#x ch_pri %#x ctrl %#x\n", readl(asp->dma + DMA_CH_STAT),
+		readl(asp->dma + DMA_CH_PRI), readl(asp->dma + DMA_CTRL));
+	for (i = 0; i < ARRAY_SIZE(asp->streams); i++) {
+		struct asp_stream *s = &asp->streams[i];
+
+		for (p = 0; p < s->nports && s->ports; p++) {
+			unsigned int c = s->ports[p].chan;
+			struct dma_lli __iomem *l = &s->lli[p * 2];
+
+			if (!(err & BIT(c)))
+				continue;
+			dev_err(asp->dev,
+				"dma ch%u: config %#x axi %#x lli %#x src %#x des %#x cnt0 %#x cur src %#x des %#x cnt0 %#x; ring A %#x/%#x/%#x B %#x/%#x/%#x\n",
+				c, readl(asp->dma + DMA_CX_CONFIG(c)), readl(asp->dma + DMA_CX_AXI_CONF(c)),
+				readl(asp->dma + DMA_CX_LLI(c)), readl(asp->dma + DMA_CX_SRC(c)),
+				readl(asp->dma + DMA_CX_DES(c)), readl(asp->dma + DMA_CX_CNT0(c)),
+				readl(asp->dma + DMA_CX_CURR_SRC(c)), readl(asp->dma + DMA_CX_CURR_DES(c)),
+				readl(asp->dma + DMA_CX_CURR_CNT0(c)),
+				readl(&l[0].lli), readl(&l[0].src_addr), readl(&l[0].des_addr),
+				readl(&l[1].lli), readl(&l[1].src_addr), readl(&l[1].des_addr));
+		}
+	}
+}
+
 static irqreturn_t asp_dma_irq(int irq, void *data)
 {
 	struct asp_pcm *asp = data;
@@ -368,9 +409,15 @@ static irqreturn_t asp_dma_irq(int irq, void *data)
 	tc = readl(asp->dma + DMA_INT_TC1) | readl(asp->dma + DMA_INT_TC2);
 	err = readl(asp->dma + DMA_INT_ERR1) | readl(asp->dma + DMA_INT_ERR2) |
 	      readl(asp->dma + DMA_INT_ERR3);
+	if (err) {
+		u32 e1 = readl(asp->dma + DMA_INT_ERR1), e2 = readl(asp->dma + DMA_INT_ERR2);
+		u32 e3 = readl(asp->dma + DMA_INT_ERR3);
+
+		dev_err_ratelimited(asp->dev, "dma error, channels %#x (err1 %#x err2 %#x err3 %#x)\n",
+			err, e1, e2, e3);
+		asp_dump_err_channels(asp, err);
+	}
 	dma_clear_irq(asp, stat);
-	if (err)
-		dev_err_ratelimited(asp->dev, "dma error, channels %#x\n", err);
 
 	for (i = 0; i < ARRAY_SIZE(asp->streams); i++) {
 		struct asp_stream *s = &asp->streams[i];
@@ -635,6 +682,82 @@ static const struct snd_soc_component_driver asp_pcm_component = {
 	.pcm_construct = asp_pcm_new,
 };
 
+/*
+ * debugfs asp-pcm/dmac: the whole ASP DMAC, read-only. The block is only clocked while
+ * a substream is open, so power it up around the read like asp_pcm_open() does.
+ */
+static int asp_dmac_show(struct seq_file *m, void *unused)
+{
+	struct asp_pcm *asp = m->private;
+	unsigned int c, g;
+	int ret;
+
+	ret = regulator_enable(asp->asp_supply);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(asp->asp_clk);
+	if (ret) {
+		regulator_disable(asp->asp_supply);
+		return ret;
+	}
+	mutex_lock(&asp->lock);
+	seq_printf(m, "users %u ch_stat %#010x ch_pri %#010x ctrl %#010x\n", asp->users,
+		readl(asp->dma + DMA_CH_STAT), readl(asp->dma + DMA_CH_PRI), readl(asp->dma + DMA_CTRL));
+	seq_printf(m, "raw tc1 %#x tc2 %#x err1 %#x err2 %#x err3 %#x\n",
+		readl(asp->dma + DMA_INT_TC1_RAW), readl(asp->dma + DMA_INT_TC2_RAW),
+		readl(asp->dma + DMA_INT_ERR1_RAW), readl(asp->dma + DMA_INT_ERR2_RAW),
+		readl(asp->dma + DMA_INT_ERR3_RAW));
+	for (g = 0; g < 4; g++)
+		seq_printf(m, "group %u: stat %#x masks tc1 %#x tc2 %#x err1 %#x err2 %#x err3 %#x\n", g,
+			readl(asp->dma + 0x40 * g), readl(asp->dma + DMA_INT_TC1_MASK + 0x40 * g),
+			readl(asp->dma + DMA_INT_TC2_MASK + 0x40 * g),
+			readl(asp->dma + DMA_INT_ERR1_MASK + 0x40 * g),
+			readl(asp->dma + DMA_INT_ERR2_MASK + 0x40 * g),
+			readl(asp->dma + DMA_INT_ERR3_MASK + 0x40 * g));
+	for (c = 0; c < DMA_NR_CHANNELS; c++)
+		seq_printf(m, "ch%-2u config %#010x axi %#010x lli %#010x src %#010x des %#010x cnt0 %#x cur src %#010x des %#010x cnt0 %#x\n",
+			c, readl(asp->dma + DMA_CX_CONFIG(c)), readl(asp->dma + DMA_CX_AXI_CONF(c)),
+			readl(asp->dma + DMA_CX_LLI(c)), readl(asp->dma + DMA_CX_SRC(c)),
+			readl(asp->dma + DMA_CX_DES(c)), readl(asp->dma + DMA_CX_CNT0(c)),
+			readl(asp->dma + DMA_CX_CURR_SRC(c)), readl(asp->dma + DMA_CX_CURR_DES(c)),
+			readl(asp->dma + DMA_CX_CURR_CNT0(c)));
+	mutex_unlock(&asp->lock);
+	clk_disable_unprepare(asp->asp_clk);
+	regulator_disable(asp->asp_supply);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(asp_dmac);
+
+/* ASP_CFG ranges worth seeing: resets/gates/clocks/DSP/DMAC select, security, SLIMbus format */
+static const struct { u32 from, to; } asp_cfg_ranges[] = {
+	{ 0x000, 0x07c }, { 0x100, 0x11c }, { 0x1b8, 0x1e8 },
+};
+
+static int asp_cfg_show(struct seq_file *m, void *unused)
+{
+	struct asp_pcm *asp = m->private;
+	unsigned int i, r;
+	int ret;
+
+	if (!asp->cfg)
+		return -ENODEV;
+	ret = regulator_enable(asp->asp_supply);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(asp->asp_clk);
+	if (ret) {
+		regulator_disable(asp->asp_supply);
+		return ret;
+	}
+	for (i = 0; i < ARRAY_SIZE(asp_cfg_ranges); i++)
+		for (r = asp_cfg_ranges[i].from; r <= asp_cfg_ranges[i].to; r += 4)
+			seq_printf(m, "%#05x %#010x\n", r, readl(asp->cfg + r));
+	clk_disable_unprepare(asp->asp_clk);
+	regulator_disable(asp->asp_supply);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(asp_cfg);
+
 static int asp_pcm_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -662,10 +785,15 @@ static int asp_pcm_probe(struct platform_device *pdev)
 	if (!np)
 		return dev_err_probe(dev, -ENODEV, "no SLIMbus node\n");
 	ret = of_address_to_resource(np, 0, &res);
-	of_node_put(np);
-	if (ret)
+	if (ret) {
+		of_node_put(np);
 		return ret;
+	}
 	asp->slimbus_phys = res.start;
+	/* the SLIMbus node's second range is ASP_CFG; mapped again (shared), only read */
+	if (!of_address_to_resource(np, 1, &res))
+		asp->cfg = devm_ioremap(dev, res.start, 0x200);
+	of_node_put(np);
 
 	np = of_parse_phandle(dev->of_node, "memory-region", 0);
 	if (!np)
@@ -710,6 +838,22 @@ static int asp_pcm_probe(struct platform_device *pdev)
 	ret = devm_snd_soc_register_component(dev, &asp_pcm_component, &asp_pcm_dai, 1);
 	if (ret)
 		return ret;
+	{
+		struct dentry *d = debugfs_create_dir("asp-pcm", NULL);
+
+		debugfs_create_file("dmac", 0400, d, asp, &asp_dmac_fops);
+		debugfs_create_file("asp_cfg", 0400, d, asp, &asp_cfg_fops);
+	}
+	if (asp->cfg && !regulator_enable(asp->asp_supply)) {
+		if (!clk_prepare_enable(asp->asp_clk)) {
+			dev_info(dev, "ASP_CFG: rst %#x gate %#x dsp runstall %#x status %#x dmac_sel %#x tz %#x slim fmt %#x chnl %#x\n",
+				readl(asp->cfg + 0x8), readl(asp->cfg + 0x18), readl(asp->cfg + 0x44),
+				readl(asp->cfg + 0x50), readl(asp->cfg + 0x54), readl(asp->cfg + 0x100),
+				readl(asp->cfg + 0x1bc), readl(asp->cfg + 0x1c0));
+			clk_disable_unprepare(asp->asp_clk);
+		}
+		regulator_disable(asp->asp_supply);
+	}
 	dev_info(dev, "ASP PCM: dma buffers at %pa, SLIMbus fifos at %pa\n",
 		&asp->area_phys, &asp->slimbus_phys);
 	return 0;
