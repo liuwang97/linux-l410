@@ -1552,6 +1552,87 @@ void bfg_check_timer_work(struct pm_drv_data *pm_data)
     }
 }
 
+/*
+ * Beat timeout resync.
+ *
+ * The beat timer runs while the host has BFGX marked awake; any packet from the chip counts
+ * as a beat. The failure seen on the L410: after a wake-up nothing decodable came back from
+ * the chip. It kept its wake GPIO high and refused every ALLOWDEV_SLP ("device does not agree
+ * to sleep"), so the host never closed the port and never did another wake-up, every HCI
+ * command timed out and the beat timer fired every 3 s until reboot. Leaving the host UART at
+ * the wrong rate after a wake-up reproduces exactly that. The vendor answer is a BFGX reset
+ * (g_beat_timeout_reset_enable, off here: its firmware download shares the PCIe link with
+ * WiFi). Instead put the host side to sleep the way the sleep handshake does: port closed (the
+ * next open pulses the UART reset and programs the line again), TX queues dropped. The next
+ * transfer wakes the chip; with the wake GPIO already high, the "ack lost" path of
+ * process_host_wkup_dev_fail() brings the link back.
+ */
+static int beat_resync = 1;
+module_param(beat_resync, int, 0644);
+MODULE_PARM_DESC(beat_resync, "on a BFGX beat timeout, drop the stale awake state (1) or only log it (0)");
+
+STATIC void bfgx_beat_resync_work(oal_work_stru *work)
+{
+    struct pm_drv_data *pm_data = container_of(work, struct pm_drv_data, beat_resync_work);
+    struct ps_core_s *ps_core_d = pm_get_core(pm_data);
+    struct st_exception_info *exc = get_exception_info_reference();
+    static unsigned long last_report;
+    static uint32_t unreported;
+    unsigned long flags;
+
+    if ((ps_core_d == NULL) || (exc == NULL) || bfgx_is_shutdown() ||
+        (bfgx_dev_state_get(pm_data) != BFGX_ACTIVE)) {
+        return;
+    }
+    if (atomic_read(&exc->bfgx_beat_flag) == BFGX_RECV_BEAT_INFO) {
+        /* the chip answered after all: keep watching */
+        pm_data->operate_beat_timer(BEAT_TIMER_RESET);
+        return;
+    }
+
+    pm_data->beat_resync_cnt++;
+    if ((last_report == 0) || time_after(jiffies, last_report + 60 * HZ)) {
+        /* rx bytes in the silent period: >0 means the chip talks but nothing decodes */
+        ps_print_err("[%s]no packet from BFGX for %d s while awake, resync #%u (%u unreported): "
+                     "wake gpio %d, uart %d, tiocm 0x%x, rx %d bytes in that time, tx %d rx %d, txq %u+%u, visit %d\n",
+                     index2name(pm_data->index), BFGX_BEAT_TIME, pm_data->beat_resync_cnt, unreported,
+                     oal_gpio_get_value(pm_data->wakeup_host_gpio), bfgx_uart_state_get(pm_data),
+                     ps_uart_get_tiocm(ps_core_d),
+                     atomic_read(&ps_core_d->tty_rx_cnt) - pm_data->beat_rx_mark,
+                     atomic_read(&ps_core_d->tty_tx_cnt), atomic_read(&ps_core_d->tty_rx_cnt),
+                     ps_core_d->tx_high_seq.qlen, ps_core_d->tx_low_seq.qlen,
+                     atomic_read(&ps_core_d->node_visit_flag));
+        declare_dft_trace_key_info("bfgx beat timeout", OAL_DFT_TRACE_EXCEP);
+        last_report = jiffies;
+        unreported = 0;
+    } else {
+        unreported++;
+    }
+
+    oal_spin_lock_irq_save(&pm_data->uart_state_spinlock, &flags);
+    bfgx_uart_state_set(pm_data, UART_NOT_READY);
+    bfgx_dev_state_set(pm_data, BFGX_SLEEP);
+    pm_data->bfg_timer_mod_cnt = 0;
+    pm_data->bfg_timer_mod_cnt_pre = 0;
+    oal_spin_unlock_irq_restore(&pm_data->uart_state_spinlock, &flags);
+
+    oal_spin_lock_irq_save(&pm_data->wakelock_protect_spinlock, &flags);
+    bfg_wake_unlock(pm_data);
+    oal_spin_unlock_irq_restore(&pm_data->wakelock_protect_spinlock, &flags);
+
+    release_tty_drv(ps_core_d);
+}
+
+/* called by the beat timer (softirq) on a timeout: true if the resync takes over */
+bool bfgx_beat_resync(struct pm_drv_data *pm_data)
+{
+    if (!beat_resync || (pm_data == NULL) || (pm_data->wkup_dev_workqueue == NULL)) {
+        return false;
+    }
+    queue_work(pm_data->wkup_dev_workqueue, &pm_data->beat_resync_work);
+    return true;
+}
+
 static int32_t bfg_timer_expire_param_check(struct pm_drv_data *pm_data)
 {
     if (unlikely(pm_data == NULL)) {
@@ -3419,6 +3500,7 @@ STATIC int low_power_remove(struct pm_drv_data *pm_data, int index)
     pm_data->bfg_timer_mod_cnt_pre = 0;
 
     del_timer_sync(&pm_data->dev_ack_timer);
+    cancel_work_sync(&pm_data->beat_resync_work);
     /* destory wake lock */
     oal_wake_lock_exit(&pm_data->bus_wake_lock);
     oal_wake_lock_exit(&pm_data->bt_wake_lock);
@@ -3572,6 +3654,7 @@ static int low_power_workq_init(struct pm_drv_data *pm_data, int idx)
     INIT_WORK(&pm_data->wkup_dev_work, host_wkup_dev_work);
     INIT_WORK(&pm_data->send_disallow_msg_work, host_send_disallow_msg);
     INIT_WORK(&pm_data->send_allow_sleep_work, host_allow_bfg_sleep);
+    INIT_WORK(&pm_data->beat_resync_work, bfgx_beat_resync_work);
 
     /* init bfg wake lock */
     oal_wake_lock_init(&pm_data->bus_wake_lock, BFG_LOCK_NAME);

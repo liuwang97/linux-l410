@@ -81,5 +81,6 @@ int32_t release_tty_drv(struct ps_core_s *ps_core_d);
 int32_t ps_change_uart_baud_rate(struct ps_core_s *ps_core_d, long baud_rate, uint8_t enable_flowctl);
 void ps_tty_tx_cnt_add(struct ps_core_s *ps_core_d, uint32_t cnt);
 void ps_uart_state_dump(struct ps_core_s *ps_core_d);
+int ps_uart_get_tiocm(struct ps_core_s *ps_core_d);
 uint32_t ps_uart_state_cur(struct ps_core_s *ps_core_d, uint32_t index);
 #endif

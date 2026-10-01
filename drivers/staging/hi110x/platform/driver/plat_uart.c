@@ -50,6 +50,14 @@ void ps_uart_state_dump(struct ps_core_s *ps_core_d)
                   ps_core_d->tty ? serdev_device_get_tiocm(ps_core_d->tty) : 0);
 }
 
+/* modem lines of the open BUART (TIOCM_CTS: the chip accepts data), -1 while closed */
+int ps_uart_get_tiocm(struct ps_core_s *ps_core_d)
+{
+    struct serdev_device *serdev = ps_core_d->tty;
+
+    return serdev ? serdev_device_get_tiocm(serdev) : -1;
+}
+
 static size_t ps_serdev_receive(struct serdev_device *serdev, const u8 *data, size_t count)
 {
     struct ps_core_s *ps_core_d = serdev_device_get_drvdata(serdev);
@@ -301,6 +309,8 @@ int32_t release_tty_drv(struct ps_core_s *ps_core_d)
 
     serdev = ps_core_d->tty;
     ps_core_d->tty = NULL;
+    /* bytes stuck behind an inactive CTS would hold the close for closing_wait (30 s) */
+    serdev_device_set_flow_control(serdev, false);
     serdev_device_close(serdev);
 
     atomic_set(&ps_core_d->force_tx_exit, 0);

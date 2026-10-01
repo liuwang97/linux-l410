@@ -278,6 +278,9 @@ struct pm_drv_data {
     oal_work_stru wkup_dev_work;
     oal_work_stru send_disallow_msg_work;
     oal_work_stru send_allow_sleep_work;
+    oal_work_stru beat_resync_work;
+    uint32_t beat_resync_cnt;
+    int32_t beat_rx_mark;
     uint32_t uart_baud_switch_to;
 
     /* wait device ack timer */
@@ -380,6 +383,7 @@ int32_t hi110x_get_wifi_power_stat(void);
 int32_t device_mem_check(unsigned long long *time);
 int32_t memcheck_is_working(void);
 void bfg_check_timer_work(struct pm_drv_data *pm_data);
+bool bfgx_beat_resync(struct pm_drv_data *pm_data);
 #ifdef CONFIG_HI110X_GPS_SYNC
 struct gnss_sync_data *gnss_get_sync_data(void);
 int gnss_sync_init(void);

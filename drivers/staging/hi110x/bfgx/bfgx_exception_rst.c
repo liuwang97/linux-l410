@@ -91,6 +91,19 @@ void plat_beat_timeout_reset_set(unsigned long arg)
     ps_print_info("plat beat timer timeOut reset cfg set value = %ld\n", arg);
 }
 
+/* BUART byte count at the start of a beat period, for the beat timeout resync report */
+OAL_STATIC void beat_mark_rx(struct st_exception_info *pst_exception_data)
+{
+    struct ps_core_s *ps_core_d = NULL;
+
+    if (pst_exception_data->ps_plat_d != NULL) {
+        ps_core_d = pst_exception_data->ps_plat_d->core_data;
+    }
+    if ((ps_core_d != NULL) && (ps_core_d->pm_data != NULL)) {
+        ps_core_d->pm_data->beat_rx_mark = atomic_read(&ps_core_d->tty_rx_cnt);
+    }
+}
+
 int32_t mod_beat_timer(uint8_t on)
 {
     int ret;
@@ -103,6 +116,7 @@ int32_t mod_beat_timer(uint8_t on)
     if (on) {
         ret = mod_timer(&pst_exception_data->bfgx_beat_timer, jiffies + BFGX_BEAT_TIME * HZ);
         atomic_set(&pst_exception_data->bfgx_beat_flag, BFGX_NOT_RECV_BEAT_INFO);
+        beat_mark_rx(pst_exception_data);
         ps_print_info("reset beat timer, ret=%d, jiffers=%lu, expires=%lu\n",
                       ret, jiffies, pst_exception_data->bfgx_beat_timer.expires);
     } else {
@@ -163,6 +177,11 @@ OAL_STATIC void bfgx_beat_timer_expire(struct timer_list *t)
 
         timer_restart_cnt = 0;
 
+        /* not re-armed: the resync puts the host side to sleep, the next wake-up re-arms it */
+        if ((g_beat_timeout_reset_enable != PLAT_EXCEPTION_ENABLE) && bfgx_beat_resync(ps_core_d->pm_data)) {
+            return;
+        }
+
         ps_print_err("###########host can not recvive bfgx beat info@@@@@@@@@@@@@@!\n");
 
         declare_dft_trace_key_info("bfgx beat timeout", OAL_DFT_TRACE_EXCEP);
@@ -179,6 +198,7 @@ OAL_STATIC void bfgx_beat_timer_expire(struct timer_list *t)
     }
 
     atomic_set(&pst_exception_data->bfgx_beat_flag, BFGX_NOT_RECV_BEAT_INFO);
+    beat_mark_rx(pst_exception_data);
 
     timer_restart_cnt = 0;
     ret = mod_timer(&pst_exception_data->bfgx_beat_timer, jiffies + BFGX_BEAT_TIME * HZ);
