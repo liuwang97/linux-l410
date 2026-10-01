@@ -868,6 +868,13 @@ static const struct panfrost_compatible amlogic_data = {
 	.vendor_quirk = panfrost_gpu_amlogic_quirk,
 };
 
+static const struct panfrost_compatible hisi_kirin990_data = {
+	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
+	.supply_names = default_supplies,
+	.num_pm_domains = 1,
+	.vendor_quirk = panfrost_gpu_hisi_kirin990_quirk,
+};
+
 static const char * const mediatek_pm_domains[] = { "core0", "core1", "core2",
 						    "core3", "core4" };
 /*
@@ -935,6 +942,7 @@ static const struct of_device_id dt_match[] = {
 	  .data = &amlogic_data, },
 	{ .compatible = "amlogic,meson-g12a-mali",
 	  .data = &amlogic_data, },
+	{ .compatible = "hisilicon,kirin990-mali", .data = &hisi_kirin990_data },
 	{ .compatible = "arm,mali-t604", .data = &default_data, },
 	{ .compatible = "arm,mali-t624", .data = &default_data, },
 	{ .compatible = "arm,mali-t628", .data = &default_data, },

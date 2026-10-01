@@ -9,8 +9,11 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/mfd/syscon.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/regmap.h>
 
 #include "panfrost_device.h"
 #include "panfrost_features.h"
@@ -110,6 +113,38 @@ void panfrost_gpu_amlogic_quirk(struct panfrost_device *pfdev)
 	 */
 	gpu_write(pfdev, GPU_PWR_KEY, GPU_PWR_KEY_UNLOCK);
 	gpu_write(pfdev, GPU_PWR_OVERRIDE1, 0xfff | (0x20 << 16));
+}
+
+/* HiSilicon Kirin 990 GPU glue registers in PCTRL */
+#define KIRIN990_PERI_CTRL19		0x050	/* [11:9] memory striping granule */
+#define KIRIN990_PERI_CTRL92		0x230	/* [16:0] RAM deep sleep by software */
+#define KIRIN990_PERI_CTRL93		0x234	/* [1] RAM auto shutdown by hardware */
+
+void panfrost_gpu_hisi_kirin990_quirk(struct panfrost_device *pfdev)
+{
+	struct device_node *np;
+	struct regmap *pctrl;
+
+	/*
+	 * The Kirin 990 integration of the Mali-G76 keeps the GPU RAMs in
+	 * software-controlled deep sleep until released through PCTRL, and the
+	 * memory striping granule must match the interconnect hash (256 bytes).
+	 */
+	np = of_parse_phandle(pfdev->dev->of_node, "hisilicon,pctrl", 0);
+	if (!np) {
+		dev_warn_once(pfdev->dev, "no hisilicon,pctrl phandle\n");
+		return;
+	}
+	pctrl = device_node_to_regmap(np);
+	of_node_put(np);
+	if (IS_ERR(pctrl)) {
+		dev_warn_once(pfdev->dev, "no PCTRL regmap: %pe\n", pctrl);
+		return;
+	}
+
+	regmap_set_bits(pctrl, KIRIN990_PERI_CTRL19, GENMASK(11, 9));
+	regmap_set_bits(pctrl, KIRIN990_PERI_CTRL93, BIT(1));
+	regmap_clear_bits(pctrl, KIRIN990_PERI_CTRL92, GENMASK(16, 0));
 }
 
 static void panfrost_gpu_init_quirks(struct panfrost_device *pfdev)
