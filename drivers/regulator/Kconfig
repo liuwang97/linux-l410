@@ -487,6 +487,16 @@ config REGULATOR_HISI_SPMI
 	  Kirin 990. The voltage tables and control registers come from the
 	  vendor firmware device tree.
 
+config REGULATOR_HISI_IP
+	tristate "HiSilicon Kirin 990 IP power domains"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on ARM64 && OF
+	help
+	  Power domains of the media, display, video, GPU, NPU and audio
+	  subsystems of the HiSilicon Kirin 990 (Huawei Qingyun L410),
+	  switched by the trusted firmware or the LPM3 power controller and
+	  exposed as regulators like in the vendor device tree.
+
 config REGULATOR_HI6421V600
 	tristate "HiSilicon Hi6421v600 PMIC voltage regulator support"
 	depends on MFD_HI6421_SPMI && OF
