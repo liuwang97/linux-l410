@@ -195,6 +195,7 @@ struct kport_pcie {
 	bool			bridge_up;
 	bool			enumerated;
 	bool			usr_suspended;
+	bool			pm_hidden;	/* RC off across a system sleep */
 	u32			ep_link_status;
 	struct pci_dev		*root_port;
 	struct pci_saved_state	*rp_state;
@@ -1652,6 +1653,60 @@ static void kport_pcie_shutdown(struct platform_device *pdev)
 	mutex_unlock(&k->lock);
 }
 
+/*
+ * An endpoint driver that powers its link down itself (hi110x does it from a
+ * PM notifier, before the devices suspend) leaves the RC unpowered for the
+ * whole system sleep.  The PCI core would then find the root port
+ * inaccessible, give up waiting for its link on resume and mark every device
+ * below it disconnected for good, so the endpoint's config reads return ~0
+ * even after its driver powers the link up again.  Keep the PM core away from
+ * that hierarchy while it is off; prepare runs parents first and complete
+ * children first, so the flag spans the whole sleep.
+ */
+static int kport_set_syscore(struct pci_dev *pdev, void *on)
+{
+	dev_pm_syscore_device(&pdev->dev, *(bool *)on);
+	return 0;
+}
+
+static void kport_pm_hide(struct kport_pcie *k, bool on)
+{
+	struct pci_dev *rp = kport_root_port(k);
+
+	if (!rp)
+		return;
+	dev_pm_syscore_device(&rp->dev, on);
+	if (rp->subordinate)
+		pci_walk_bus(rp->subordinate, kport_set_syscore, &on);
+}
+
+static int kport_pcie_prepare(struct device *dev)
+{
+	struct kport_pcie *k = dev_get_drvdata(dev);
+
+	mutex_lock(&k->enum_lock);
+	mutex_lock(&k->lock);
+	k->pm_hidden = k->bridge_up && !k->powered;
+	if (k->pm_hidden)
+		kport_pm_hide(k, true);
+	mutex_unlock(&k->lock);
+	mutex_unlock(&k->enum_lock);
+	return 0;
+}
+
+static void kport_pcie_complete(struct device *dev)
+{
+	struct kport_pcie *k = dev_get_drvdata(dev);
+
+	mutex_lock(&k->enum_lock);
+	mutex_lock(&k->lock);
+	if (k->pm_hidden)
+		kport_pm_hide(k, false);
+	k->pm_hidden = false;
+	mutex_unlock(&k->lock);
+	mutex_unlock(&k->enum_lock);
+}
+
 /* the DesignWare helpers power the RC through the host init/deinit ops */
 static int kport_pcie_suspend_noirq(struct device *dev)
 {
@@ -1673,6 +1728,8 @@ static int kport_pcie_resume_noirq(struct device *dev)
 }
 
 static const struct dev_pm_ops kport_pcie_pm_ops = {
+	.prepare = kport_pcie_prepare,
+	.complete = kport_pcie_complete,
 	NOIRQ_SYSTEM_SLEEP_PM_OPS(kport_pcie_suspend_noirq, kport_pcie_resume_noirq)
 };
 
