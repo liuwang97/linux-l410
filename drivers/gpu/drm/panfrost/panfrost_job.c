@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright 2019 Linaro, Ltd, Rob Herring <robh@kernel.org> */
 /* Copyright 2019 Collabora ltd. */
+#include <linux/capability.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/dma-resv.h>
@@ -29,9 +31,28 @@
 
 struct panfrost_queue_state {
 	struct drm_gpu_scheduler sched;
+	struct workqueue_struct *submit_wq;
 	u64 fence_context;
 	u64 emit_seqno;
 };
+
+/*
+ * A compositor runs its frame at real-time priority and then waits for the
+ * scheduler's submit work to reach the hardware; an ordinary kworker can sit
+ * behind a busy CPU for a whole time slice. Use a high priority workqueue.
+ */
+static bool highpri_submit = true;
+module_param(highpri_submit, bool, 0444);
+MODULE_PARM_DESC(highpri_submit, "Run job submission from a high priority workqueue");
+
+/*
+ * Jobs of openers with CAP_SYS_NICE (the compositor, e.g. kwin_wayland) go
+ * through the high priority run queue, the permission model of the Linux 6.19
+ * JM context priorities, until Mesa can ask for it explicitly.
+ */
+static bool compositor_priority = true;
+module_param(compositor_priority, bool, 0644);
+MODULE_PARM_DESC(compositor_priority, "High scheduling priority for CAP_SYS_NICE openers");
 
 struct panfrost_job_slot {
 	struct panfrost_queue_state queue[NUM_JOB_SLOTS];
@@ -80,9 +101,18 @@ static const char *panfrost_fence_get_timeline_name(struct dma_fence *fence)
 	}
 }
 
+static void panfrost_fence_set_deadline(struct dma_fence *fence, ktime_t deadline)
+{
+	struct panfrost_fence *f = to_panfrost_fence(fence);
+	struct panfrost_device *pfdev = f->dev->dev_private;
+
+	panfrost_devfreq_set_deadline(&pfdev->pfdevfreq, fence, deadline);
+}
+
 static const struct dma_fence_ops panfrost_fence_ops = {
 	.get_driver_name = panfrost_fence_get_driver_name,
 	.get_timeline_name = panfrost_fence_get_timeline_name,
+	.set_deadline = panfrost_fence_set_deadline,
 };
 
 static struct dma_fence *panfrost_fence_create(struct panfrost_device *pfdev, int js_num)
@@ -883,9 +913,18 @@ int panfrost_job_init(struct panfrost_device *pfdev)
 	for (j = 0; j < NUM_JOB_SLOTS; j++) {
 		js->queue[j].fence_context = dma_fence_context_alloc(1);
 
+		args.submit_wq = NULL;
+		if (highpri_submit) {
+			js->queue[j].submit_wq =
+				alloc_ordered_workqueue("pan_js%d", WQ_HIGHPRI | WQ_MEM_RECLAIM, j);
+			args.submit_wq = js->queue[j].submit_wq;
+		}
+
 		ret = drm_sched_init(&js->queue[j].sched, &args);
 		if (ret) {
 			dev_err(pfdev->dev, "Failed to create scheduler: %d.", ret);
+			if (js->queue[j].submit_wq)
+				destroy_workqueue(js->queue[j].submit_wq);
 			goto err_sched;
 		}
 	}
@@ -895,8 +934,11 @@ int panfrost_job_init(struct panfrost_device *pfdev)
 	return 0;
 
 err_sched:
-	for (j--; j >= 0; j--)
+	for (j--; j >= 0; j--) {
 		drm_sched_fini(&js->queue[j].sched);
+		if (js->queue[j].submit_wq)
+			destroy_workqueue(js->queue[j].submit_wq);
+	}
 
 	destroy_workqueue(pfdev->reset.wq);
 	return ret;
@@ -911,6 +953,8 @@ void panfrost_job_fini(struct panfrost_device *pfdev)
 
 	for (j = 0; j < NUM_JOB_SLOTS; j++) {
 		drm_sched_fini(&js->queue[j].sched);
+		if (js->queue[j].submit_wq)
+			destroy_workqueue(js->queue[j].submit_wq);
 	}
 
 	cancel_work_sync(&pfdev->reset.work);
@@ -921,14 +965,17 @@ int panfrost_job_open(struct panfrost_file_priv *panfrost_priv)
 {
 	struct panfrost_device *pfdev = panfrost_priv->pfdev;
 	struct panfrost_job_slot *js = pfdev->js;
+	enum drm_sched_priority prio = DRM_SCHED_PRIORITY_NORMAL;
 	struct drm_gpu_scheduler *sched;
 	int ret, i;
+
+	if (READ_ONCE(compositor_priority) && capable(CAP_SYS_NICE))
+		prio = DRM_SCHED_PRIORITY_HIGH;
 
 	for (i = 0; i < NUM_JOB_SLOTS; i++) {
 		sched = &js->queue[i].sched;
 		ret = drm_sched_entity_init(&panfrost_priv->sched_entity[i],
-					    DRM_SCHED_PRIORITY_NORMAL, &sched,
-					    1, NULL);
+					    prio, &sched, 1, NULL);
 		if (WARN_ON(ret))
 			return ret;
 	}

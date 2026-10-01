@@ -361,6 +361,13 @@ panfrost_ioctl_wait_bo(struct drm_device *dev, void *data,
 	if (!gem_obj)
 		return -ENOENT;
 
+	/* the CPU is about to block on the GPU: wait-boost, as msm does */
+	if (timeout && !dma_resv_test_signaled(gem_obj->resv, DMA_RESV_USAGE_READ)) {
+		struct panfrost_device *pfdev = dev->dev_private;
+
+		panfrost_devfreq_boost(&pfdev->pfdevfreq, PANFROST_BOOST_WAIT);
+	}
+
 	ret = dma_resv_wait_timeout(gem_obj->resv, DMA_RESV_USAGE_READ,
 				    true, timeout);
 	if (!ret)
@@ -674,8 +681,19 @@ static int panthor_gems_show(struct seq_file *m, void *data)
 	return 0;
 }
 
+static int panfrost_boost_show(struct seq_file *m, void *data)
+{
+	struct drm_info_node *node = m->private;
+	struct panfrost_device *pfdev = node->minor->dev->dev_private;
+
+	panfrost_devfreq_debugfs_show(&pfdev->pfdevfreq, m);
+
+	return 0;
+}
+
 static struct drm_info_list panthor_debugfs_list[] = {
 	{"gems", panthor_gems_show, 0, NULL},
+	{"devfreq_boost", panfrost_boost_show, 0, NULL},
 };
 
 static int panthor_gems_debugfs_init(struct drm_minor *minor)
