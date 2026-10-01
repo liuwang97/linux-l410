@@ -7,6 +7,7 @@
  */
 
 #include <linux/debugfs.h>
+#include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -19,11 +20,17 @@
 #include "hi6405_drv.h"
 
 /* TAS2562 book 0 / page 0 registers */
+#define TAS2562_PWR_CTRL	0x02
+#define TAS2562_MODE_MASK	0x03
+#define TAS2562_MODE_SHUTDOWN	0x02
 #define TAS2562_PB_CFG1		0x03
 #define TAS2562_TDM_CFG2	0x08
 #define TAS2562_RX_SCFG_MASK	0x30
 #define TAS2562_RX_SCFG_LEFT	0x10
 #define TAS2562_RX_SCFG_RIGHT	0x20
+
+/* book 0 / page 2: idle channel detection threshold, 32 bit big endian */
+#define TAS2562_IDC_DTH		(2 * 128 + 0x64)
 
 struct hi6405_card {
 	struct snd_soc_card card;
@@ -46,11 +53,36 @@ static const struct snd_soc_pcm_stream hi6405_spk_params = {
 	.channels_max = 2,
 };
 
+/*
+ * The codec stops the I2S4 frame clock when its S4_TX_DRV widget powers down,
+ * which DAPM does before it powers down the TAS2562 DAC widgets (out_drv goes
+ * ahead of dac). An amp losing its clocks while playing drops out with a TDM
+ * clock error, which pops. Before any widget powers down, shut both amps down
+ * and give them the vendor's 20 ms to ramp out while the clocks still run.
+ */
+static int hi6405_speaker_event(struct snd_soc_dapm_widget *w,
+	struct snd_kcontrol *kcontrol, int event)
+{
+	struct hi6405_card *priv = container_of(snd_soc_dapm_to_card(w->dapm),
+		struct hi6405_card, card);
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(priv->amps); i++)
+		if (priv->amps[i])
+			snd_soc_component_update_bits(priv->amps[i], TAS2562_PWR_CTRL,
+				TAS2562_MODE_MASK, TAS2562_MODE_SHUTDOWN);
+	msleep(20);
+	return 0;
+}
+
 static const struct snd_soc_dapm_widget hi6405_card_widgets[] = {
 	SND_SOC_DAPM_HP("Headphone", NULL),
 	SND_SOC_DAPM_MIC("Headset Mic", NULL),
 	SND_SOC_DAPM_MIC("Internal Mic", NULL),
-	SND_SOC_DAPM_SPK("Speaker", NULL),
+	{	/* SND_SOC_DAPM_SPK() only offers POST_PMU and PRE_PMD events */
+		.id = snd_soc_dapm_spk, .name = "Speaker", .reg = SND_SOC_NOPM,
+		.event = hi6405_speaker_event, .event_flags = SND_SOC_DAPM_WILL_PMD,
+	},
 	/*
 	 * The playback SLIMbus track is started by the codec's AUDIO_PLAY_DRV
 	 * widget. Keep that widget powered whenever a playback stream runs, even
@@ -78,7 +110,10 @@ static const struct snd_kcontrol_new hi6405_card_controls[] = {
 /*
  * Register values the vendor user space (hwaudioservice) wrote to both
  * amplifiers before first use, restricted to book 0 pages 0-4 (regmap range
- * of the upstream driver): boost current limit and class-H settings.
+ * of the upstream driver): boost current limit and class-H settings, and the
+ * idle channel threshold at -90 dBFS. The chip default of -60 dBFS auto-mutes
+ * the amp after 100 ms of quiet audio and restarts it when the level comes
+ * back, over and over at low volume.
  */
 static const struct {
 	unsigned int reg, val;
@@ -88,6 +123,10 @@ static const struct {
 	{ 0x3b, 0x38 },
 	{ 0x3c, 0x3c },
 	{ 0x3e, 0x30 },
+	{ TAS2562_IDC_DTH + 0, 0x00 },
+	{ TAS2562_IDC_DTH + 1, 0x01 },
+	{ TAS2562_IDC_DTH + 2, 0x09 },
+	{ TAS2562_IDC_DTH + 3, 0x45 },
 };
 
 /*
