@@ -1,0 +1,56 @@
+// Performance and power: GPU energy model and passive cooling.
+
+// Mali-G76: energy model for the power allocator and EAS-style accounting.
+// Vendor kbase power model (mali_kbase_config_hisilicon.c): mW = C * mV^2 *
+// MHz / 1e9 with C = gpu_dyn_capacitance (8538, /capacitances in the firmware
+// DT), the same scale as the OPP core's dynamic-power-coefficient. The
+// voltages are the vendor operating-points; LPM3 applies them itself (there
+// is no GPU regulator in Linux), they only feed the energy model.
+&{/mali@FE140000} {
+	#cooling-cells = <2>;
+	dynamic-power-coefficient = <8538>;
+};
+
+&gpu_opp_table {
+	opp-166000000 { opp-microvolt = <450000>; };
+	opp-185000000 { opp-microvolt = <550000>; };
+	opp-208000000 { opp-microvolt = <570000>; };
+	opp-230000000 { opp-microvolt = <570000>; };
+	opp-253000000 { opp-microvolt = <570000>; };
+	opp-277000000 { opp-microvolt = <570000>; };
+	opp-304000000 { opp-microvolt = <590000>; };
+	opp-332000000 { opp-microvolt = <590000>; };
+	opp-375000000 { opp-microvolt = <640000>; };
+	opp-418000000 { opp-microvolt = <640000>; };
+	opp-461000000 { opp-microvolt = <640000>; };
+	opp-509000000 { opp-microvolt = <680000>; };
+	opp-557000000 { opp-microvolt = <680000>; };
+	opp-600000000 { opp-microvolt = <680000>; };
+};
+
+// GPU: throttle from 90 C like the CPU clusters, before the 105 C shutdown.
+// Needed before the performance mode pins the GPU at 600 MHz.
+&{/thermal-zones/gpu} {
+	trips {
+		gpu_hot: hot {
+			temperature = <90000>;
+			hysteresis = <5000>;
+			type = "passive";
+		};
+	};
+
+	cooling-maps {
+		map0 {
+			trip = <&gpu_hot>;
+			cooling-device = <&{/mali@FE140000} 0xffffffff 0xffffffff>;
+		};
+	};
+};
+
+// DDR: kirin990-ddr-devfreq votes the minimum DDR frequency in PMCTRL; the node keeps the
+// vendor operating-points (415 ... 2133 MHz, index order of the SCTRL readback). The two
+// other vendor nodes at the same address (up-threshold, latency) stay without a driver.
+&{/ddr_devfreq@fffc0000} {
+	compatible = "hisilicon,kirin990-ddr";
+	/delete-property/ clocks;
+};
