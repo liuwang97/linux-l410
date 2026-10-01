@@ -63,6 +63,7 @@ void slimbus_utils_freq_release(void);
 uint32_t slimbus_utils_port_state_get(const void __iomem *slimbus_base_addr);
 uint32_t slimbus_utils_asp_state_get(const void __iomem *asppower_base_addr, uint32_t offset);
 void slimbus_utils_module_enable(const struct slimbus_device_info *dev, bool enable);
+void slimbus_utils_asp_ip_reset(void);
 void slimbus_utils_set_soc_div_freq_disable(bool div_disable);
 
 #endif

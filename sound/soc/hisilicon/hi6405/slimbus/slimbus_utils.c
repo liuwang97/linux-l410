@@ -251,6 +251,26 @@ void slimbus_utils_module_enable(const struct slimbus_device_info *dev, bool ena
 	}
 }
 
+/*
+ * A warm reboot does not reset the ASP subsystem: the SLIMbus manager, the ASP DMAC and
+ * the sample rate converters keep whatever the previous OS set up (after the vendor kernel
+ * has run, capture on U1/U2 fails with a DMA error at the first chunk boundary until the
+ * machine is powered off). Pulse their resets once, before the manager is configured;
+ * slimbus_utils_module_enable() then releases every ASP reset as before.
+ */
+#define ASP_IP_RESET_MASK	(BIT(14) /* SLIMBUS_N */ | BIT(13) /* SLIMBUS_BASE_N */ | \
+				 BIT(10) /* SRC_DOWN_N */ | BIT(9) /* SRC_UP_N */ | BIT(8) /* DMAC_N */)
+
+void slimbus_utils_asp_ip_reset(void)
+{
+	if (asp_reg_base_addr == NULL)
+		return;
+	slimbus_reg_write(asp_reg_base_addr + ASP_CFG_R_RST_CTRLEN_REG, ASP_IP_RESET_MASK);
+	udelay(10);
+	slimbus_reg_write(asp_reg_base_addr + ASP_CFG_R_RST_CTRLDIS_REG, ASP_IP_RESET_MASK);
+	udelay(10);
+}
+
 void slimbus_utils_init(void __iomem *addr, int32_t src_freq)
 {
 	if (addr)

@@ -2087,6 +2087,7 @@ static int32_t slimbus_probe(struct platform_device *pdev)
 		goto slimbus_err;
 	}
 
+	slimbus_utils_asp_ip_reset();
 	slimbus_utils_module_enable(slimbus_devices[pd->device_type], true);
 
 	ret = slimbus_drv_preprocess(pd);

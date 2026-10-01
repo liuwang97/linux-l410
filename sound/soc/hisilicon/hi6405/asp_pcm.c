@@ -93,9 +93,12 @@
 #define PLAY_CH_MAX		2
 #define CAP_CH_MAX		4
 
+/* an LLI node: the DMAC loads it into CX_LLI .. CX_CONFIG in this order */
 struct dma_lli {
 	u32 lli;
-	u32 reserved[3];
+	u32 bindx;	/* 2D/3D transfer indexes and count: always 0 here */
+	u32 cindx;
+	u32 cnt1;
 	u32 a_count;
 	u32 src_addr;
 	u32 des_addr;
@@ -224,7 +227,17 @@ static void asp_stream_setup_dma(struct asp_stream *s)
 			u32 mem = s->buf_phys + stream_chunk_off(s, h, p);
 			u32 next = lli_phys + ((h + 1) % 2) * sizeof(struct dma_lli);
 
+			/*
+			 * Write every word of the node, as the vendor pcm_codec.c
+			 * does (memset first): the carve-out keeps whatever the
+			 * previous OS or the HiFi DSP left there across a warm
+			 * reset, and the DMAC takes the node's BINDX/CINDX/CNT1
+			 * when it moves on to chunk B.
+			 */
 			writel(next | DMA_LLI_LINK, &lli[h].lli);
+			writel(0, &lli[h].bindx);
+			writel(0, &lli[h].cindx);
+			writel(0, &lli[h].cnt1);
 			writel(CHUNK_BYTES, &lli[h].a_count);
 			writel(playback ? mem : fifo, &lli[h].src_addr);
 			writel(playback ? fifo : mem, &lli[h].des_addr);
@@ -384,6 +397,12 @@ static void asp_dump_err_channels(struct asp_pcm *asp, u32 err)
 				readl(asp->dma + DMA_CX_CURR_CNT0(c)),
 				readl(&l[0].lli), readl(&l[0].src_addr), readl(&l[0].des_addr),
 				readl(&l[1].lli), readl(&l[1].src_addr), readl(&l[1].des_addr));
+			dev_err(asp->dev,
+				"dma ch%u: bindx %#x cindx %#x cnt1 %#x; ring A %#x/%#x/%#x B %#x/%#x/%#x (bindx/cindx/cnt1)\n",
+				c, readl(asp->dma + DMA_CX_BINDX(c)), readl(asp->dma + DMA_CX_CINDX(c)),
+				readl(asp->dma + DMA_CX_CNT1(c)),
+				readl(&l[0].bindx), readl(&l[0].cindx), readl(&l[0].cnt1),
+				readl(&l[1].bindx), readl(&l[1].cindx), readl(&l[1].cnt1));
 		}
 	}
 }
