@@ -1557,6 +1557,13 @@ config RTC_DRV_PL030
 	  To compile this driver as a module, choose M here: the
 	  module will be called rtc-pl030.
 
+config RTC_DRV_HISI_SPMI
+	tristate "HiSilicon SPMI PMIC (Kirin 990 generation) RTC"
+	depends on MFD_HISI_SPMI_PMIC
+	help
+	  Battery backed RTC in the SPMI PMIC used with the HiSilicon
+	  Kirin 990 (Huawei Qingyun L410).
+
 config RTC_DRV_PL031
 	tristate "ARM AMBA PL031 RTC"
 	depends on ARM_AMBA
