@@ -12,6 +12,14 @@ config KIRIN_HW_VOTE
 	  HiSilicon Kirin 990 (Huawei Qingyun L410), used by cpufreq and the
 	  peripheral DVFS code.
 
+config KIRIN_PERI_DVFS
+	bool "HiSilicon Kirin 990 peripheral voltage voting"
+	depends on KIRIN_HW_VOTE && HWSPINLOCK
+	help
+	  Lets the Kirin 990 clock driver raise the shared peripheral rail
+	  before fast peripheral clocks are enabled (vendor "peri DVFS"),
+	  through PMCTRL and the LPM3 hardware vote.
+
 config KUNPENG_HCCS
 	tristate "HCCS driver on Kunpeng SoC"
 	depends on ACPI
