@@ -785,6 +785,17 @@ static int ufs_kirin_apply_dev_quirks(struct ufs_hba *hba)
 	return 0;
 }
 
+static void ufs_kirin_fixup_dev_quirks(struct ufs_hba *hba)
+{
+	/*
+	 * The vendor kernel never turns auto-BKOPS off for SanDisk/WDC parts
+	 * ("Autobkops need to be enable for Sandisk ufs device"); the closest
+	 * core policy keeps it enabled except across suspend.
+	 */
+	if (hba->dev_info.wmanufacturerid == UFS_VENDOR_WDC)
+		hba->caps |= UFSHCD_CAP_KEEP_AUTO_BKOPS_ENABLED_EXCEPT_SUSPEND;
+}
+
 static int ufs_kirin_device_reset(struct ufs_hba *hba)
 {
 	struct ufs_kirin_host *host = ufshcd_get_variant(hba);
@@ -971,6 +982,7 @@ static const struct ufs_hba_variant_ops ufs_hba_kirin_vops = {
 	.suspend = ufs_kirin_suspend,
 	.resume = ufs_kirin_resume,
 	.apply_dev_quirks = ufs_kirin_apply_dev_quirks,
+	.fixup_dev_quirks = ufs_kirin_fixup_dev_quirks,
 	.dbg_register_dump = ufs_kirin_dbg_register_dump,
 	.device_reset = ufs_kirin_device_reset,
 };
