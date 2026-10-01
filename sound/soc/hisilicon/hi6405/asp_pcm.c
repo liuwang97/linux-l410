@@ -10,6 +10,10 @@
  * the chunk that just finished is converted from/to the interleaved ALSA
  * buffer, which lives in normal memory. Based on the vendor pcm_codec.c,
  * platform_io.c, format.c, armpc_custom.c and asp_dma.c (Huawei, GPL-2.0).
+ *
+ * Playback copies a period out of the ALSA buffer one chunk before the DMA
+ * plays it, so the reported hw_ptr is the copy position: the application may
+ * overwrite everything before it. The chunks in flight are reported as delay.
  */
 
 #include <linux/clk.h>
@@ -119,7 +123,8 @@ struct asp_stream {
 	struct dma_lli __iomem *lli;	/* 2 per port */
 	u32 lli_phys;
 	unsigned int sample_bytes;	/* 2 (S16_LE) or 4 (S32_LE) */
-	unsigned int pos;		/* periods completed since start */
+	unsigned int pos;		/* capture: periods completed since start */
+	snd_pcm_uframes_t fill;		/* playback: buffer offset of the next period to copy */
 	unsigned int irq_pending;	/* channels that finished this round */
 	bool running;
 };
@@ -230,12 +235,29 @@ static void asp_stream_setup_dma(struct asp_stream *s)
 	}
 }
 
-/* ALSA period -> one chunk per port (mono, 32-bit left aligned) */
-static void asp_fill_chunk(struct asp_stream *s, unsigned int half, unsigned int period)
+/* frames of the next period to copy that the application has written */
+static unsigned int asp_play_written(struct asp_stream *s)
 {
 	struct snd_pcm_runtime *rt = s->substream->runtime;
-	unsigned int ch = rt->channels, p, i;
-	u8 *src = rt->dma_area + frames_to_bytes(rt, period * PERIOD_FRAMES);
+	snd_pcm_uframes_t hw = rt->status->hw_ptr % rt->buffer_size;
+	snd_pcm_sframes_t n;
+
+	/* written past hw_ptr, less how far the copy position already is past it */
+	n = snd_pcm_playback_hw_avail(rt) -
+	    (snd_pcm_sframes_t)((s->fill + rt->buffer_size - hw) % rt->buffer_size);
+	return clamp_t(snd_pcm_sframes_t, n, 0, PERIOD_FRAMES);
+}
+
+/*
+ * Next ALSA period -> one chunk per port (mono, 32-bit left aligned). Frames
+ * the application has not written yet play as silence rather than whatever
+ * the buffer held one cycle earlier.
+ */
+static void asp_fill_chunk(struct asp_stream *s, unsigned int half)
+{
+	struct snd_pcm_runtime *rt = s->substream->runtime;
+	unsigned int ch = rt->channels, n = asp_play_written(s), p, i;
+	u8 *src = rt->dma_area + frames_to_bytes(rt, s->fill);
 
 	for (p = 0; p < s->nports; p++) {
 		u32 __iomem *dst = s->buf + stream_chunk_off(s, half, p);
@@ -243,15 +265,27 @@ static void asp_fill_chunk(struct asp_stream *s, unsigned int half, unsigned int
 		if (s->sample_bytes == 2) {
 			const s16 *in = (const s16 *)src + p;
 
-			for (i = 0; i < PERIOD_FRAMES; i++, in += ch)
+			for (i = 0; i < n; i++, in += ch)
 				writel((u32)((s32)*in << 16), dst + i);
 		} else {
 			const s32 *in = (const s32 *)src + p;
 
-			for (i = 0; i < PERIOD_FRAMES; i++, in += ch)
+			for (i = 0; i < n; i++, in += ch)
 				writel((u32)*in, dst + i);
 		}
+		for (; i < PERIOD_FRAMES; i++)
+			writel(0, dst + i);
 	}
+
+	s->fill = (s->fill + PERIOD_FRAMES) % rt->buffer_size;
+}
+
+static void asp_silence_chunk(struct asp_stream *s, unsigned int half)
+{
+	unsigned int p;
+
+	for (p = 0; p < s->nports; p++)
+		memset_io(s->buf + stream_chunk_off(s, half, p), 0, CHUNK_BYTES);
 }
 
 /* one chunk per port -> ALSA period */
@@ -305,9 +339,8 @@ static void asp_stream_period(struct asp_stream *s)
 	unsigned int half = asp_idle_half(s);
 
 	if (s->substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		s->pos++;
-		/* the idle chunk plays after the running one: two periods ahead */
-		asp_fill_chunk(s, half, (s->pos + 1) % rt->periods);
+		/* the idle chunk plays after the running one */
+		asp_fill_chunk(s, half);
 	} else {
 		asp_drain_chunk(s, half, s->pos % rt->periods);
 		s->pos++;
@@ -367,8 +400,10 @@ static irqreturn_t asp_dma_irq(int irq, void *data)
 }
 
 static const struct snd_pcm_hardware asp_pcm_hw = {
+	/* BATCH: the position only moves in whole periods */
 	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP |
-		SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_BLOCK_TRANSFER,
+		SNDRV_PCM_INFO_MMAP_VALID | SNDRV_PCM_INFO_BLOCK_TRANSFER |
+		SNDRV_PCM_INFO_BATCH,
 	.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE,
 	.rates = SNDRV_PCM_RATE_48000,
 	.rate_min = ASP_RATE,
@@ -464,6 +499,7 @@ static int asp_pcm_prepare(struct snd_soc_component *component,
 		dma_stop_channel(asp, s->ports[p].chan);
 	s->running = false;
 	s->pos = 0;
+	s->fill = 0;
 	s->irq_pending = 0;
 	memset_io(s->buf, 0, 2 * s->nports * CHUNK_BYTES);
 	asp_stream_setup_dma(s);
@@ -484,9 +520,13 @@ static int asp_pcm_trigger(struct snd_soc_component *component,
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 		mutex_lock(&asp->lock);
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-			/* chunk A plays period pos, chunk B period pos + 1 */
-			asp_fill_chunk(s, 0, s->pos % substream->runtime->periods);
-			asp_fill_chunk(s, 1, (s->pos + 1) % substream->runtime->periods);
+			/*
+			 * Chunk A plays silence, chunk B the first period: a start
+			 * takes one period, which is what the application has
+			 * at least prefilled.
+			 */
+			asp_silence_chunk(s, 0);
+			asp_fill_chunk(s, 1);
 		}
 		if (cmd != SNDRV_PCM_TRIGGER_START)
 			asp_stream_setup_dma(s);
@@ -527,7 +567,32 @@ static snd_pcm_uframes_t asp_pcm_pointer(struct snd_soc_component *component,
 	struct asp_pcm *asp = to_asp(component);
 	struct asp_stream *s = &asp->streams[substream->stream];
 
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		return s->fill;
 	return (s->pos % substream->runtime->periods) * PERIOD_FRAMES;
+}
+
+/* playback: frames copied to the DMA chunks but not played yet */
+static snd_pcm_sframes_t asp_pcm_delay(struct snd_soc_component *component,
+	struct snd_pcm_substream *substream)
+{
+	struct asp_pcm *asp = to_asp(component);
+	struct asp_stream *s = &asp->streams[substream->stream];
+	u32 cur, a, b, done = 0;
+
+	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK || !s->running)
+		return 0;
+
+	cur = readl(asp->dma + DMA_CX_SRC(s->ports[0].chan));
+	a = s->buf_phys + stream_chunk_off(s, 0, 0);
+	b = s->buf_phys + stream_chunk_off(s, 1, 0);
+	if (cur >= a && cur <= a + CHUNK_BYTES)
+		done = (cur - a) / 4;
+	else if (cur >= b && cur <= b + CHUNK_BYTES)
+		done = (cur - b) / 4;
+
+	/* the rest of the running chunk and all of the queued one */
+	return 2 * PERIOD_FRAMES - min_t(u32, done, PERIOD_FRAMES);
 }
 
 static int asp_pcm_new(struct snd_soc_component *component,
@@ -566,6 +631,7 @@ static const struct snd_soc_component_driver asp_pcm_component = {
 	.trigger = asp_pcm_trigger,
 	.sync_stop = asp_pcm_sync_stop,
 	.pointer = asp_pcm_pointer,
+	.delay = asp_pcm_delay,
 	.pcm_construct = asp_pcm_new,
 };
 
