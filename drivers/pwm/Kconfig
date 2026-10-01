@@ -282,6 +282,17 @@ config PWM_HIBVT
 	  To compile this driver as a module, choose M here: the module
 	  will be called pwm-hibvt.
 
+config PWM_HISI_BLPWM
+	tristate "HiSilicon Kirin backlight PWM support"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on HAS_IOMEM
+	help
+	  Backlight PWM output (BLPWM) of HiSilicon Kirin SoCs such as the
+	  Kirin 990.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called pwm-hisi-blpwm.
+
 config PWM_IMG
 	tristate "Imagination Technologies PWM driver"
 	depends on HAS_IOMEM
