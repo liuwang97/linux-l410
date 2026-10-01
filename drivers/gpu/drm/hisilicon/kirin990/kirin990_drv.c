@@ -20,10 +20,13 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
+#include <linux/sched.h>
+#include <linux/soc/hisilicon/l410-perf.h>
 
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
@@ -40,6 +43,7 @@
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_prime.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
@@ -119,7 +123,32 @@ struct kirin_dss {
 	u32 underflows;
 	struct work_struct recover_work;
 	struct delayed_work report_work;
+
+	/* transparent buffer the cursor layer shows while "hidden" */
+	void *cursor_blank;
+	dma_addr_t cursor_blank_dma;
+
+	/* nonblocking commits run here: SCHED_FIFO, as msm's commit threads */
+	struct kthread_worker *commit_worker;
+
+	/* filtered vblank timestamps (irq_lock) */
+	ktime_t vbl_raw, vbl_est;
+	u64 frame_ns;
+
+	/* primary plane flips: vblanks between consecutive new frames */
+	u64 last_flip_vbl;
+	unsigned long flips, flip_gap[4];	/* 1, 2, 3, 4+ vblanks */
+	unsigned long flush_in_blank;		/* flushed in VFP/VSW/VBP */
+	unsigned long foreign_imports;		/* dma-bufs refused */
 };
+
+/* nonblocking commits are handed to the SCHED_FIFO worker in this state */
+struct kirin_atomic_state {
+	struct drm_atomic_state base;
+	struct kthread_work hw_work;
+};
+
+#define to_kirin_state(s) container_of(s, struct kirin_atomic_state, base)
 
 #define to_kirin(x) container_of(x, struct kirin_dss, drm)
 
@@ -131,9 +160,30 @@ static bool selftest = true;
 module_param(selftest, bool, 0444);
 MODULE_PARM_DESC(selftest, "Scan out test patterns at probe and log the output CRCs");
 
-static bool cursor_plane;
+/*
+ * Verified on the L410 with Plasma (KWin uses it): no LDI underflow through
+ * cursor moves, shape changes, hiding, window drags and maximize cycles.
+ */
+static bool cursor_plane = true;
 module_param(cursor_plane, bool, 0444);
-MODULE_PARM_DESC(cursor_plane, "Expose a hardware cursor plane (experimental)");
+MODULE_PARM_DESC(cursor_plane, "Expose a hardware cursor plane");
+
+static bool rt_commit = true;
+module_param(rt_commit, bool, 0444);
+MODULE_PARM_DESC(rt_commit, "Run nonblocking commits from a SCHED_FIFO thread");
+
+static bool vblank_filter = true;
+module_param(vblank_filter, bool, 0644);
+MODULE_PARM_DESC(vblank_filter, "Filter the interrupt latency out of vblank timestamps");
+
+/*
+ * The DSS scans out through a 32-bit DMA window without an IOMMU; buffers of
+ * other drivers (e.g. Panfrost's) are neither contiguous nor below 4 GiB, and
+ * mapping them bounces through swiotlb for milliseconds before failing.
+ */
+static bool foreign_import;
+module_param(foreign_import, bool, 0644);
+MODULE_PARM_DESC(foreign_import, "Try to import dma-bufs of other drivers");
 
 static inline u32 dss_rd(struct kirin_dss *k, u32 off)
 {
@@ -239,6 +289,34 @@ static void kirin_dump_state(struct kirin_dss *k)
 /* firmware state */
 
 /*
+ * The refresh rate is not recoverable from the timing registers (the pixel
+ * clock comes from the D-PHY PLL), and it is not 60 Hz: the L410 panel runs
+ * at 60.51 Hz. A mode that claims 60 Hz makes compositors schedule frames
+ * against the wrong period (KWin extrapolates the next vblank from it, and
+ * after an idle period its target drifts by milliseconds). Measure it: time
+ * the raw VSYNC status over a number of frames before the interrupt is hooked.
+ */
+#define KIRIN_MEASURE_FRAMES	16
+
+static u64 kirin_measure_frame_ns(struct kirin_dss *k)
+{
+	ktime_t t0 = 0, t = 0;
+	unsigned int i;
+	u32 v;
+
+	for (i = 0; i <= KIRIN_MEASURE_FRAMES; i++) {
+		dsi_wr(k, MIPI_LDI_CPU_ITF_INTS, LDI_INT_VSYNC);
+		if (readl_poll_timeout(k->base + DSS_DSI0 + MIPI_LDI_CPU_ITF_INTS, v,
+				       v & LDI_INT_VSYNC, 20, 50 * USEC_PER_MSEC))
+			return 0;
+		t = ktime_get();
+		if (!i)
+			t0 = t;
+	}
+	return div_u64(ktime_to_ns(ktime_sub(t, t0)), KIRIN_MEASURE_FRAMES);
+}
+
+/*
  * Rebuild the mode that UEFI programmed. The DSI host timing registers count
  * horizontal periods in lane byte clocks; HRZ_CTRL3 holds the active width in
  * the same unit, which gives the byte clock / pixel clock ratio.
@@ -248,6 +326,7 @@ static int kirin_read_fw_mode(struct kirin_dss *k)
 	struct drm_display_mode *m = &k->fw_mode;
 	u32 hact, vact, hact_lbc, hsa, hbp, hline, vsa, vbp, vfp;
 	u32 hsw, hbpx, htotal, vtotal, pol;
+	u64 frame_ns;
 
 	hact = (dsi_rd(k, MIPI_LDI_DPI0_HRZ_CTRL2) & 0xfff) + 1;
 	vact = (dsi_rd(k, MIPI_LDI_VRT_CTRL2) & 0xfff) + 1;
@@ -282,8 +361,16 @@ static int kirin_read_fw_mode(struct kirin_dss *k)
 	m->vsync_start = vact + vfp;
 	m->vsync_end = vact + vfp + vsa;
 	m->vtotal = vtotal;
-	/* the refresh rate is not recoverable from these registers: 60 Hz */
-	m->clock = DIV_ROUND_CLOSEST(htotal * vtotal * 60, 1000);
+	frame_ns = kirin_measure_frame_ns(k);
+	if (frame_ns > 8 * NSEC_PER_MSEC && frame_ns < 34 * NSEC_PER_MSEC) {
+		m->clock = DIV_ROUND_CLOSEST_ULL((u64)htotal * vtotal * USEC_PER_SEC, frame_ns);
+		drm_info(&k->drm, "measured frame period %llu ns (%llu.%03llu Hz)\n", frame_ns,
+			 div_u64(NSEC_PER_SEC, frame_ns),
+			 div_u64(NSEC_PER_SEC * 1000ULL, frame_ns) % 1000);
+	} else {
+		drm_warn(&k->drm, "can't measure the refresh rate, assuming 60 Hz\n");
+		m->clock = DIV_ROUND_CLOSEST(htotal * vtotal * 60, 1000);
+	}
 	m->flags = (pol & BIT(2) ? DRM_MODE_FLAG_NHSYNC : DRM_MODE_FLAG_PHSYNC) |
 		   (pol & BIT(1) ? DRM_MODE_FLAG_NVSYNC : DRM_MODE_FLAG_PVSYNC);
 	m->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
@@ -535,58 +622,29 @@ static int kirin_cursor_atomic_check(struct drm_plane *plane,
 	return 0;
 }
 
-static void kirin_cursor_hide(struct kirin_dss *k)
-{
-	const struct kirin_rch *r = &kirin_rch[k->cursor_ch];
-	u32 sel;
-
-	dss_rmw(k, DSS_OVL0 + OV_LAYER(k->cursor_layer) + OV_LAYER_CFG, BIT(0), 0);
-	sel = dss_rd(k, DSS_MCTL_SYS + MCTL_RCH_OV0_SEL);
-	sel |= 0xf << (4 * (k->cursor_layer + 1));
-	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_OV0_SEL, sel);
-	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_OV_OEN(k->cursor_ch), 0);
-	dss_rmw(k, r->dma + DMA_CH_CTL, CH_CTL_EN, 0);
-	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_FLUSH_EN(k->cursor_ch), 1);
-	dss_wr(k, DSS_MCTL_SYS + MCTL_OV0_FLUSH_EN, 0xd);
-}
-
 /*
  * Program a whole read channel + OV layer (called with the MCTL mutex held).
  * The DMA fetches whole 16-byte units, so the source window is widened to a
  * multiple of 4 pixels and the DFC clips the extra pixels off again. The DMA
  * starts at the first fetched pixel, with zero DMA window offsets.
+ *
+ * The layer is never switched off again once used: turning an OV layer off
+ * and flushing OV0 is what left the LDI in permanent underflow during
+ * bring-up. Hiding the cursor shows a transparent buffer instead.
  */
-static void kirin_cursor_atomic_update(struct drm_plane *plane,
-				       struct drm_atomic_state *state)
+static void kirin_cursor_program(struct kirin_dss *k, dma_addr_t addr, u32 pitch,
+				 const struct kirin_format *fmt, u32 sx, u32 w,
+				 u32 h, u32 dx, u32 dy, u32 alpha)
 {
-	struct kirin_dss *k = to_kirin(plane->dev);
-	struct drm_plane_state *new = drm_atomic_get_new_plane_state(state, plane);
 	const struct kirin_rch *r = &kirin_rch[k->cursor_ch];
-	struct drm_framebuffer *fb = new->fb;
-	const struct kirin_format *fmt;
-	u32 sx, sy, w, h, dx, dy, ax0, ax1, clip_l, clip_r, sel, alpha;
-	dma_addr_t addr;
+	u32 ax0, ax1, clip_l, clip_r, sel;
 	unsigned int i;
 
-	if (!new->visible || !fb) {
-		kirin_cursor_hide(k);
-		return;
-	}
-
-	fmt = kirin_find_format(fb->format->format);
-	sx = new->src.x1 >> 16;
-	sy = new->src.y1 >> 16;
-	w = drm_rect_width(&new->dst);
-	h = drm_rect_height(&new->dst);
-	dx = new->dst.x1;
-	dy = new->dst.y1;
 	ax0 = round_down(sx, 4);
 	ax1 = round_up(sx + w, 4);
 	clip_l = sx - ax0;
 	clip_r = ax1 - (sx + w);
-	/* new->src is the source rectangle after clipping to the CRTC */
-	addr = drm_fb_dma_get_gem_obj(fb, 0)->dma_addr + fb->offsets[0] +
-	       sy * fb->pitches[0] + ax0 * 4;
+	addr += ax0 * 4;
 
 	for (i = 0; i < r->smr_num; i++)
 		dss_wr(k, DSS_SMMU + SMMU_SMRX_NS(r->smr_first + i), SMMU_SMR_BYPASS);
@@ -602,7 +660,7 @@ static void kirin_cursor_atomic_update(struct drm_plane *plane,
 	dss_wr(k, r->dma + DMA_CTRL, DMA_CTRL_FMT(fmt->dma_fmt));
 	dss_wr(k, r->dma + DMA_TILE_SCRAM, 0);
 	dss_wr(k, r->dma + DMA_DATA_ADDR0, lower_32_bits(addr));
-	dss_wr(k, r->dma + DMA_STRIDE0, fb->pitches[0] / 16);
+	dss_wr(k, r->dma + DMA_STRIDE0, pitch / 16);
 	dss_wr(k, r->dma + DMA_STRETCH_STRIDE0, 0);
 	dss_wr(k, r->dma + DMA_BUF_BASE + DMA_BUF_CTRL, k->rch_buf_ctrl);
 	dss_wr(k, r->dma + DMA_CH_CTL, k->rch_ctl | CH_CTL_EN);
@@ -618,8 +676,6 @@ static void kirin_cursor_atomic_update(struct drm_plane *plane,
 	dss_wr(k, r->dma + DFC_BASE + DFC_PADDING_CTL, 0);
 	dss_wr(k, r->dma + DFC_BASE + DFC_BITEXT_CTL, k->rch_bitext);
 
-	alpha = fmt->alpha && new->pixel_blend_mode != DRM_MODE_BLEND_PIXEL_NONE ?
-		OV_ALPHA_PREMULT_OVER : OV_ALPHA_OPAQUE;
 	i = DSS_OVL0 + OV_LAYER(k->cursor_layer);
 	dss_wr(k, i + OV_LAYER_POS, (dy << 16) | dx);
 	dss_wr(k, i + OV_LAYER_SIZE, ((dy + h - 1) << 16) | (dx + w - 1));
@@ -638,6 +694,45 @@ static void kirin_cursor_atomic_update(struct drm_plane *plane,
 	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_OV_OEN(k->cursor_ch), MCTL_OV_OEN_OV0);
 	dss_wr(k, DSS_MCTL_SYS + MCTL_RCH_FLUSH_EN(k->cursor_ch), 1);
 	dss_wr(k, DSS_MCTL_SYS + MCTL_OV0_FLUSH_EN, 0xd);
+}
+
+#define KIRIN_CURSOR_BLANK	16	/* 16x16 transparent ARGB8888 */
+
+static void kirin_cursor_hide(struct kirin_dss *k)
+{
+	kirin_cursor_program(k, k->cursor_blank_dma, KIRIN_CURSOR_BLANK * 4,
+			     kirin_find_format(DRM_FORMAT_ARGB8888), 0,
+			     KIRIN_CURSOR_BLANK, KIRIN_CURSOR_BLANK, 0, 0,
+			     OV_ALPHA_PREMULT_OVER);
+}
+
+static void kirin_cursor_atomic_update(struct drm_plane *plane,
+				       struct drm_atomic_state *state)
+{
+	struct kirin_dss *k = to_kirin(plane->dev);
+	struct drm_plane_state *new = drm_atomic_get_new_plane_state(state, plane);
+	struct drm_framebuffer *fb = new->fb;
+	const struct kirin_format *fmt;
+	u32 sx, sy, alpha;
+	dma_addr_t addr;
+
+	if (!new->visible || !fb) {
+		kirin_cursor_hide(k);
+		return;
+	}
+
+	fmt = kirin_find_format(fb->format->format);
+	sx = new->src.x1 >> 16;
+	sy = new->src.y1 >> 16;
+	/* new->src is the source rectangle after clipping to the CRTC */
+	addr = drm_fb_dma_get_gem_obj(fb, 0)->dma_addr + fb->offsets[0] +
+	       sy * fb->pitches[0];
+	alpha = fmt->alpha && new->pixel_blend_mode != DRM_MODE_BLEND_PIXEL_NONE ?
+		OV_ALPHA_PREMULT_OVER : OV_ALPHA_OPAQUE;
+
+	kirin_cursor_program(k, addr, fb->pitches[0], fmt, sx,
+			     drm_rect_width(&new->dst), drm_rect_height(&new->dst),
+			     new->dst.x1, new->dst.y1, alpha);
 }
 
 static void kirin_cursor_atomic_disable(struct drm_plane *plane,
@@ -698,6 +793,16 @@ static int kirin_crtc_atomic_check(struct drm_crtc *crtc,
 static void kirin_crtc_atomic_enable(struct drm_crtc *crtc,
 				     struct drm_atomic_state *state)
 {
+	struct kirin_dss *k = to_kirin(crtc->dev);
+	const struct drm_display_mode *m = &crtc->state->adjusted_mode;
+	unsigned long flags;
+
+	spin_lock_irqsave(&k->irq_lock, flags);
+	k->frame_ns = m->clock ? div_u64((u64)m->htotal * m->vtotal * USEC_PER_SEC,
+					 m->clock) : 0;
+	k->vbl_est = 0;
+	spin_unlock_irqrestore(&k->irq_lock, flags);
+
 	drm_crtc_vblank_on(crtc);
 }
 
@@ -734,6 +839,32 @@ static void kirin_crtc_atomic_begin(struct drm_crtc *crtc,
 	kirin_mutex_lock(to_kirin(crtc->dev));
 }
 
+/* frame statistics: how many vblanks between consecutive new primary frames */
+static void kirin_count_flip(struct kirin_dss *k, struct drm_crtc *crtc,
+			     struct drm_atomic_state *state)
+{
+	struct drm_plane_state *old, *new;
+	u32 vstate;
+	u64 vbl;
+
+	new = drm_atomic_get_new_plane_state(state, crtc->primary);
+	old = drm_atomic_get_old_plane_state(state, crtc->primary);
+	if (!new || !new->fb || (old && old->fb == new->fb))
+		return;
+
+	vstate = dsi_rd(k, MIPI_LDI_VSTATE) & LDI_VSTATE_MASK;
+	if (vstate & (LDI_VSTATE_VFP | LDI_VSTATE_VSW | LDI_VSTATE_VBP))
+		k->flush_in_blank++;
+
+	vbl = drm_crtc_vblank_count(crtc);
+	if (k->flips && vbl > k->last_flip_vbl)
+		k->flip_gap[min_t(u64, vbl - k->last_flip_vbl, 4) - 1]++;
+	k->last_flip_vbl = vbl;
+	k->flips++;
+
+	l410_perf_frame();
+}
+
 static void kirin_crtc_atomic_flush(struct drm_crtc *crtc,
 				    struct drm_atomic_state *state)
 {
@@ -741,6 +872,7 @@ static void kirin_crtc_atomic_flush(struct drm_crtc *crtc,
 	struct drm_pending_vblank_event *event = crtc->state->event;
 
 	kirin_mutex_unlock(k);
+	kirin_count_flip(k, crtc, state);
 
 	if (event) {
 		crtc->state->event = NULL;
@@ -761,6 +893,60 @@ static const struct drm_crtc_helper_funcs kirin_crtc_helper_funcs = {
 	.atomic_disable = kirin_crtc_atomic_disable,
 };
 
+/*
+ * vblank timestamps
+ *
+ * The DSS has no readable scanline counter, so the timestamps are taken in
+ * the vsync interrupt, which runs on a little core that may be in a cluster
+ * power-down state. The latency only ever adds to the real time, so track
+ * the vblank phase as the earliest arrival: extrapolate by one frame and pull
+ * towards later arrivals only slowly (drift); an earlier arrival or a jump
+ * resynchronises. Compositors schedule their frames from these timestamps.
+ */
+static void kirin_vblank_filter(struct kirin_dss *k, ktime_t raw)
+{
+	s64 err;
+	ktime_t pred;
+
+	spin_lock(&k->irq_lock);
+	pred = ktime_add_ns(k->vbl_est, k->frame_ns);
+	err = ktime_to_ns(ktime_sub(raw, pred));
+	if (!k->frame_ns || !vblank_filter || !k->vbl_est ||
+	    err < 0 || err > NSEC_PER_MSEC)
+		k->vbl_est = raw;
+	else
+		k->vbl_est = ktime_add_ns(pred, err / 16);
+	k->vbl_raw = raw;
+	spin_unlock(&k->irq_lock);
+}
+
+static bool kirin_crtc_get_vblank_timestamp(struct drm_crtc *crtc, int *max_error,
+					    ktime_t *vblank_time, bool in_vblank_irq)
+{
+	struct kirin_dss *k = to_kirin(crtc->dev);
+	unsigned long flags;
+	ktime_t est, now;
+	u64 frame_ns;
+
+	spin_lock_irqsave(&k->irq_lock, flags);
+	est = k->vbl_est;
+	frame_ns = k->frame_ns;
+	spin_unlock_irqrestore(&k->irq_lock, flags);
+
+	if (!est || !frame_ns)
+		return false;
+
+	if (!in_vblank_irq) {
+		/* the last vblank before now, extrapolated from the phase */
+		now = ktime_get();
+		if (ktime_after(now, est))
+			est = ktime_add_ns(est, div64_u64(ktime_to_ns(ktime_sub(now, est)),
+							  frame_ns) * frame_ns);
+	}
+	*vblank_time = est;
+	return true;
+}
+
 static const struct drm_crtc_funcs kirin_crtc_funcs = {
 	.reset = drm_atomic_helper_crtc_reset,
 	.set_config = drm_atomic_helper_set_config,
@@ -769,11 +955,13 @@ static const struct drm_crtc_funcs kirin_crtc_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
 	.enable_vblank = kirin_crtc_enable_vblank,
 	.disable_vblank = kirin_crtc_disable_vblank,
+	.get_vblank_timestamp = kirin_crtc_get_vblank_timestamp,
 };
 
 static irqreturn_t kirin_dss_irq(int irq, void *data)
 {
 	struct kirin_dss *k = data;
+	ktime_t now = ktime_get();
 	u32 ints, msk;
 
 	ints = dsi_rd(k, MIPI_LDI_CPU_ITF_INTS);
@@ -783,8 +971,10 @@ static irqreturn_t kirin_dss_irq(int irq, void *data)
 	if (!ints)
 		return IRQ_NONE;
 
-	if (ints & LDI_INT_VSYNC)
+	if (ints & LDI_INT_VSYNC) {
+		kirin_vblank_filter(k, now);
 		drm_crtc_handle_vblank(&k->crtc);
+	}
 	if (ints & LDI_INT_UNFLOW) {
 		/*
 		 * The underflow status stays set until the pipeline is reset:
@@ -1002,13 +1192,159 @@ static void kirin_report_work(struct work_struct *work)
 		schedule_delayed_work(&k->report_work, 3 * HZ);
 }
 
+static int kirin_frames_show(struct seq_file *m, void *arg)
+{
+	struct drm_debugfs_entry *entry = m->private;
+	struct kirin_dss *k = to_kirin(entry->dev);
+	unsigned long flags;
+	ktime_t raw, est;
+
+	spin_lock_irqsave(&k->irq_lock, flags);
+	raw = k->vbl_raw;
+	est = k->vbl_est;
+	spin_unlock_irqrestore(&k->irq_lock, flags);
+
+	seq_printf(m, "vblanks %llu flips %lu\n", drm_crtc_vblank_count(&k->crtc), k->flips);
+	seq_printf(m, "flip gap 1:%lu 2:%lu 3:%lu 4+:%lu vblanks\n", k->flip_gap[0],
+		   k->flip_gap[1], k->flip_gap[2], k->flip_gap[3]);
+	seq_printf(m, "flushes in blanking %lu, foreign imports refused %lu, underflows %u\n",
+		   k->flush_in_blank, k->foreign_imports, k->underflows);
+	seq_printf(m, "frame %llu ns, last vblank irq latency over estimate %lld ns\n",
+		   k->frame_ns, ktime_to_ns(ktime_sub(raw, est)));
+	return 0;
+}
+
+/* ------------------------------------------------------------------------ */
+/* commits */
+
+static struct drm_atomic_state *kirin_atomic_state_alloc(struct drm_device *dev)
+{
+	struct kirin_atomic_state *ks = kzalloc(sizeof(*ks), GFP_KERNEL);
+
+	if (!ks)
+		return NULL;
+	if (drm_atomic_state_init(dev, &ks->base) < 0) {
+		kfree(ks);
+		return NULL;
+	}
+	return &ks->base;
+}
+
+static void kirin_atomic_state_free(struct drm_atomic_state *state)
+{
+	drm_atomic_state_default_release(state);
+	kfree(to_kirin_state(state));
+}
+
+/* up to the hardware latching the new state: the time critical part */
+static void kirin_commit_hw(struct drm_atomic_state *state)
+{
+	struct drm_device *dev = state->dev;
+
+	drm_atomic_helper_wait_for_fences(dev, state, false);
+	drm_atomic_helper_wait_for_dependencies(state);
+	drm_atomic_helper_commit_modeset_disables(dev, state);
+	drm_atomic_helper_commit_planes(dev, state, 0);
+	drm_atomic_helper_commit_modeset_enables(dev, state);
+	drm_atomic_helper_fake_vblank(state);
+	drm_atomic_helper_commit_hw_done(state);
+}
+
+static void kirin_commit_cleanup(struct drm_atomic_state *state)
+{
+	drm_atomic_helper_wait_for_vblanks(state->dev, state);
+	drm_atomic_helper_cleanup_planes(state->dev, state);
+	drm_atomic_helper_commit_cleanup_done(state);
+	drm_atomic_state_put(state);
+}
+
+static void kirin_commit_cleanup_work(struct work_struct *work)
+{
+	kirin_commit_cleanup(container_of(work, struct drm_atomic_state, commit_work));
+}
+
+static void kirin_commit_hw_work(struct kthread_work *work)
+{
+	struct kirin_atomic_state *ks = container_of(work, struct kirin_atomic_state, hw_work);
+
+	kirin_commit_hw(&ks->base);
+	/* waiting for the vblank to clean up must not hold up the next commit */
+	queue_work(system_unbound_wq, &ks->base.commit_work);
+}
+
+/*
+ * drm_atomic_helper_commit() with the hardware part of nonblocking commits
+ * on a SCHED_FIFO thread instead of an ordinary kworker: a compositor
+ * commits about 2 ms before the vblank from a real-time thread and must not
+ * wait behind busy CPUs to get the registers written.
+ */
+static int kirin_atomic_commit(struct drm_device *dev, struct drm_atomic_state *state,
+			       bool nonblock)
+{
+	struct kirin_dss *k = to_kirin(dev);
+	struct kirin_atomic_state *ks = to_kirin_state(state);
+	int ret;
+
+	if (state->async_update || !k->commit_worker)
+		return drm_atomic_helper_commit(dev, state, nonblock);
+
+	ret = drm_atomic_helper_setup_commit(state, nonblock);
+	if (ret)
+		return ret;
+
+	INIT_WORK(&state->commit_work, kirin_commit_cleanup_work);
+	kthread_init_work(&ks->hw_work, kirin_commit_hw_work);
+
+	ret = drm_atomic_helper_prepare_planes(dev, state);
+	if (ret)
+		return ret;
+
+	if (!nonblock) {
+		ret = drm_atomic_helper_wait_for_fences(dev, state, true);
+		if (ret)
+			goto err;
+	}
+
+	ret = drm_atomic_helper_swap_state(state, true);
+	if (ret)
+		goto err;
+
+	drm_atomic_state_get(state);
+	if (nonblock) {
+		kthread_queue_work(k->commit_worker, &ks->hw_work);
+	} else {
+		kirin_commit_hw(state);
+		kirin_commit_cleanup(state);
+	}
+	return 0;
+
+err:
+	drm_atomic_helper_unprepare_planes(dev, state);
+	return ret;
+}
+
 /* ------------------------------------------------------------------------ */
 /* device */
+
+static struct drm_gem_object *kirin_gem_prime_import(struct drm_device *dev,
+						     struct dma_buf *dma_buf)
+{
+	struct kirin_dss *k = to_kirin(dev);
+
+	if (!drm_gem_is_prime_exported_dma_buf(dev, dma_buf) && !foreign_import) {
+		k->foreign_imports++;
+		return ERR_PTR(-EINVAL);
+	}
+	return drm_gem_prime_import(dev, dma_buf);
+}
 
 static const struct drm_mode_config_funcs kirin_mode_config_funcs = {
 	.fb_create = drm_gem_fb_create,
 	.atomic_check = drm_atomic_helper_check,
-	.atomic_commit = drm_atomic_helper_commit,
+	.atomic_commit = kirin_atomic_commit,
+	.atomic_state_alloc = kirin_atomic_state_alloc,
+	.atomic_state_clear = drm_atomic_state_default_clear,
+	.atomic_state_free = kirin_atomic_state_free,
 };
 
 DEFINE_DRM_GEM_DMA_FOPS(kirin_fops);
@@ -1017,6 +1353,7 @@ static const struct drm_driver kirin_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 	.fops = &kirin_fops,
 	DRM_GEM_DMA_DRIVER_OPS,
+	.gem_prime_import = kirin_gem_prime_import,
 	DRM_FBDEV_DMA_DRIVER_OPS,
 	.name = "kirin",
 	.desc = "HiSilicon Kirin 990 DSS",
@@ -1051,6 +1388,14 @@ static int kirin_modeset_init(struct kirin_dss *k)
 	if (ret)
 		return ret;
 	drm_plane_helper_add(&k->plane, &kirin_plane_helper_funcs);
+
+	if (cursor_plane) {
+		k->cursor_blank = dmam_alloc_coherent(drm->dev,
+						      KIRIN_CURSOR_BLANK * KIRIN_CURSOR_BLANK * 4,
+						      &k->cursor_blank_dma, GFP_KERNEL);
+		if (!k->cursor_blank)
+			cursor_plane = false;
+	}
 
 	if (cursor_plane) {
 		ret = drm_universal_plane_init(drm, &k->cursor, 0, &kirin_plane_funcs,
@@ -1220,6 +1565,18 @@ static int kirin_dss_probe(struct platform_device *pdev)
 		return ret;
 
 	drm_debugfs_add_file(&k->drm, "kirin_state", kirin_state_show, NULL);
+	drm_debugfs_add_file(&k->drm, "kirin_frames", kirin_frames_show, NULL);
+
+	if (rt_commit) {
+		struct kthread_worker *worker = kthread_run_worker(0, "kirin-commit");
+
+		if (IS_ERR(worker)) {
+			drm_warn(&k->drm, "no commit thread: %pe\n", worker);
+		} else {
+			sched_set_fifo(worker->task);
+			k->commit_worker = worker;
+		}
+	}
 
 	ret = drm_dev_register(&k->drm, 0);
 	if (ret)
@@ -1243,6 +1600,8 @@ static void kirin_dss_remove(struct platform_device *pdev)
 	drm_dev_unplug(&k->drm);
 	drm_atomic_helper_shutdown(&k->drm);
 	cancel_work_sync(&k->recover_work);
+	if (k->commit_worker)
+		kthread_destroy_worker(k->commit_worker);
 }
 
 static void kirin_dss_shutdown(struct platform_device *pdev)

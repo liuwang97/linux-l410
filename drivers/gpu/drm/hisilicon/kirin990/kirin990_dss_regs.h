@@ -50,6 +50,14 @@
 #define MIPI_LDI_DPI0_HRZ_CTRL2		0x1ec
 #define MIPI_LDI_VRT_CTRL2		0x1f0
 #define MIPI_LDI_DPI0_HRZ_CTRL3		0x1f4
+/* one-hot vertical state of the LDI (vendor dpu_init.h) */
+#define MIPI_LDI_VSTATE			0x1fc
+#define   LDI_VSTATE_MASK		0x7ff
+#define   LDI_VSTATE_IDLE		BIT(0)
+#define   LDI_VSTATE_VSW		BIT(1)
+#define   LDI_VSTATE_VBP		BIT(2)
+#define   LDI_VSTATE_VACTIVE0		BIT(3)
+#define   LDI_VSTATE_VFP		BIT(6)
 #define DSI_DPHYTX_CTRL			0x228
 #define DSI_DPHYTX_TRSTOP_FLAG		0x22c
 #define MIPI_LDI_CPU_ITF_INTS		0x248
