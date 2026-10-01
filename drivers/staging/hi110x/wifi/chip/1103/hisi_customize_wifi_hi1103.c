@@ -3736,9 +3736,12 @@ OAL_STATIC uint32_t hwifi_config_sepa_coefficient_from_param(uint8_t *puc_cust_p
     int8_t *pc_end = ";";
     int8_t *pc_sep = ",";
     uint16_t us_param_num = 0;
-    uint8_t auc_cust_param[CUS_PARAMS_LEN_MAX];
+    uint8_t auc_cust_param[CUS_PARAMS_LEN_MAX] = {0};
+    size_t len = OAL_STRLEN(puc_cust_param_info);
 
-    if (memcpy_s(auc_cust_param, CUS_PARAMS_LEN_MAX, puc_cust_param_info, OAL_STRLEN(puc_cust_param_info)) != EOK) {
+    /* keep the terminating NUL: oal_strtok must not run into the rest of the stack buffer */
+    if (len >= CUS_PARAMS_LEN_MAX ||
+        memcpy_s(auc_cust_param, CUS_PARAMS_LEN_MAX, puc_cust_param_info, len) != EOK) {
         return OAL_FAIL;
     }
 
@@ -4311,10 +4314,10 @@ OAL_STATIC uint32_t hwifi_config_nvram_second_coefficient_check(uint8_t *puc_g_c
 
     /* 获取拟合系数项 */
     if (hwifi_config_sepa_coefficient_from_param(puc_g_cust_nvram_info, l_nv_params, &us_nv_param_num,
-                                                 sizeof(l_nv_params) / sizeof(int16_t)) != OAL_SUCC ||
+                                                 ARRAY_SIZE(l_nv_params)) != OAL_SUCC ||
         (us_nv_param_num % DY_CALI_PARAMS_TIMES) ||
         hwifi_config_sepa_coefficient_from_param(puc_ini_pa_params, l_ini_params, &us_ini_param_num,
-                                                 sizeof(l_ini_params) / sizeof(int16_t)) != OAL_SUCC ||
+                                                 ARRAY_SIZE(l_ini_params)) != OAL_SUCC ||
         (us_ini_param_num % DY_CALI_PARAMS_TIMES) || (us_nv_param_num != us_ini_param_num)) {
         oam_error_log2(0, OAM_SF_CUSTOM,
             "hwifi_config_nvram_second_coefficient_check::nvram or ini is unsuitable,num of nv and ini[%d %d]!",
