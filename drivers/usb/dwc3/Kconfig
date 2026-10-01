@@ -118,6 +118,16 @@ config USB_DWC3_OF_SIMPLE
 	  Currently supports Xilinx and Qualcomm DWC USB3 IP.
 	  Say 'Y' or 'M' if you have one such device.
 
+config USB_DWC3_KIRIN990
+	tristate "HiSilicon Kirin 990 Platforms"
+	depends on (ARCH_HISI && ARM64) || COMPILE_TEST
+	depends on OF
+	default USB_DWC3 && ARCH_HISI
+	help
+	  Support the USB 3.1 controller of the HiSilicon Kirin 990 SoC
+	  (host mode). The PHY_KIRIN990_USB3 PHY driver is needed too.
+	  Say 'Y' or 'M' if you have one such device.
+
 config USB_DWC3_ST
 	tristate "STMicroelectronics Platforms"
 	depends on (ARCH_STI || COMPILE_TEST) && OF
