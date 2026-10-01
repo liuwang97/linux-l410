@@ -1,0 +1,143 @@
+// T2 power: PMIC on SPMI.
+//
+// The vendor kernel finds the SPMI slave id in a "slave_id" property; the
+// mainline SPMI core wants the generic binding: #address-cells = <2> on the
+// controller and reg = <usid SPMI_USID(0)> on each slave.
+&{/spmi@FA890000} {
+	#address-cells = <2>;
+	#size-cells = <0>;
+};
+
+&{/spmi@FA890000/pmic@0} {
+	reg = <0x9 0x0>;
+};
+
+// Sub-PMIC (buck01) is disabled in the firmware DT; keep it addressable in
+// case it gets enabled.
+&{/spmi@FA890000/pmic1@1} {
+	reg = <0x1 0x0>;
+};
+
+// Temperature sensors (hisi,tsens, firmware SMC): index = position in
+// hisi,tsensor_name ("cluster0", "cluster1", "cluster2", "gpu", "modem",
+// "npu", "peri", "ddr", "hisec").
+&{/tsens@0} {
+	#thermal-sensor-cells = <1>;
+};
+
+// cpufreq cooling (hisi-hwvote cpufreq, one policy per cluster)
+&{/cpus/cpu@0} {
+	#cooling-cells = <2>;
+};
+
+&{/cpus/cpu@400} {
+	#cooling-cells = <2>;
+};
+
+&{/cpus/cpu@600} {
+	#cooling-cells = <2>;
+};
+
+// CPU clusters: cpufreq throttling from 90 C. Critical at 105 C, the vendor
+// tsens temp_shutdown: the thermal core then powers the machine off in an
+// orderly way (hw_protection_shutdown). LPM3 and the PMIC over-temperature
+// detectors (125/140 C) remain the backstop.
+/ {
+	thermal-zones {
+		cluster0 {
+			polling-delay-passive = <200>;
+			polling-delay = <1000>;
+			thermal-sensors = <&{/tsens@0} 0>;
+
+			trips {
+				cluster0_hot: hot {
+					temperature = <90000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+
+				cluster0_crit: crit {
+					temperature = <105000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cluster0_hot>;
+					cooling-device = <&{/cpus/cpu@0} 0xffffffff 0xffffffff>;
+				};
+			};
+		};
+
+		cluster1 {
+			polling-delay-passive = <200>;
+			polling-delay = <1000>;
+			thermal-sensors = <&{/tsens@0} 1>;
+
+			trips {
+				cluster1_hot: hot {
+					temperature = <90000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+
+				cluster1_crit: crit {
+					temperature = <105000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cluster1_hot>;
+					cooling-device = <&{/cpus/cpu@400} 0xffffffff 0xffffffff>;
+				};
+			};
+		};
+
+		cluster2 {
+			polling-delay-passive = <200>;
+			polling-delay = <1000>;
+			thermal-sensors = <&{/tsens@0} 2>;
+
+			trips {
+				cluster2_hot: hot {
+					temperature = <90000>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+
+				cluster2_crit: crit {
+					temperature = <105000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cluster2_hot>;
+					cooling-device = <&{/cpus/cpu@600} 0xffffffff 0xffffffff>;
+				};
+			};
+		};
+
+		// GPU: critical only until the GPU (Panfrost devfreq) is a cooling device
+		gpu {
+			polling-delay-passive = <200>;
+			polling-delay = <1000>;
+			thermal-sensors = <&{/tsens@0} 3>;
+
+			trips {
+				gpu_crit: crit {
+					temperature = <105000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+	};
+};
