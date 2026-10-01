@@ -1,0 +1,20 @@
+// T5 pcie: stable PCI domain numbers, as on the vendor kernel
+// (RC0 -> 0000 RTL8168, RC1 -> 0001 Hi110x), independent of probe order.
+&{/pcie_kport_rc@0xf0000000} {
+	linux,pci-domain = <0>;
+};
+
+&{/pcie_kport_rc@0xf4000000} {
+	linux,pci-domain = <1>;
+};
+
+// The disabled endpoint-mode twins of the RCs carry device_type = "pci" without
+// #address-cells/#size-cells, which makes every "pci" node walker (efifb, of_pci)
+// warn. They are unused on this board.
+&{/pcie_kport_ep@0xf0000000} {
+	/delete-property/ device_type;
+};
+
+&{/pcie_kport_ep@0xf4000000} {
+	/delete-property/ device_type;
+};
