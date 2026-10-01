@@ -134,4 +134,21 @@ static inline int pm_qos_remove_notifier(int pm_qos_class, struct notifier_block
 #define sscanf_s	hi110x_sscanf_s
 #define vsscanf_s	hi110x_vsscanf_s
 
+/*
+ * ---- log gate (hi110x_log.c) ----
+ * Every printk() and print_hex_dump() of the driver goes through hi110x_printk(), which
+ * drops everything below KERN_ERR unless the "verbose" module parameter is set.
+ */
+#include <linux/printk.h>
+extern int hi110x_verbose;
+bool hi110x_log_pass(const char *level);
+int hi110x_printk(const char *fmt, ...);
+#undef printk
+#define printk(fmt, ...)	hi110x_printk(fmt, ##__VA_ARGS__)
+#define print_hex_dump(level, ...)					\
+	do {								\
+		if (hi110x_log_pass(level))				\
+			(print_hex_dump)(level, __VA_ARGS__);		\
+	} while (0)
+
 #endif /* __HI110X_COMPAT_H__ */

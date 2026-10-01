@@ -1547,7 +1547,7 @@ int32_t firmware_read_cfg(const char *cfg_patch, uint8_t *buf, uint32_t buf_len)
     set_fs(KERNEL_DS);
     fp = filp_open(cfg_patch, O_RDONLY, 0);
     if (oal_is_err_or_null(fp)) {
-        ps_print_err("open file %s fail, fp=%p, error %ld\n", cfg_patch, fp, PTR_ERR(fp));
+        ps_print_info("open file %s fail, fp=%p, error %ld\n", cfg_patch, fp, PTR_ERR(fp));
         set_fs(fs);
         fp = NULL;
         return -EFAIL;
@@ -1872,7 +1872,7 @@ int32_t firmware_get_cfg(uint8_t *cfg_patch, uint32_t idx)
 
     readlen = firmware_read_cfg(cfg_patch, read_cfg_buf, READ_CFG_BUF_LEN);
     if (readlen < 0) {
-        ps_print_err("read cfg error!\n");
+        ps_print_info("read cfg error!\n");
         os_mem_kfree(read_cfg_buf);
         read_cfg_buf = NULL;
         return -EFAIL;

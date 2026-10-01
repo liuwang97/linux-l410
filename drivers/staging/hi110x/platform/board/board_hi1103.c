@@ -491,7 +491,7 @@ void hi1103_wlan_wakeup_host_property_init(void)
 
     ret = get_cust_conf_int32(INI_MODU_PLAT, INI_WLAN_WAKEUP_HOST_REVERSE, &cfg_val);
     if (ret == INI_FAILED) {
-        ps_print_err("get %s failed\n", INI_WLAN_WAKEUP_HOST_REVERSE);
+        ps_print_info("get %s failed\n", INI_WLAN_WAKEUP_HOST_REVERSE);
     }
 
     g_st_board_info.wlan_wakeup_host_have_reverser = cfg_val;

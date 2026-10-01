@@ -52,7 +52,14 @@ static oal_define_spinlock(g_ssi_lock);
 static uint32_t g_ssi_lock_state = 0x0;
 static char g_str_gpio_ssi_dump_path[100] = HISI_TOP_LOG_DIR "/wifi/memdump";
 static int g_ssi_dfr_bypass = 0;
-static int g_ssi_dump_enable = 1;
+/*
+ * Off by default: an SSI dump switches the chip's always-on clock to the bit-banged SSI
+ * clock (see ssi_try_lock()) and, done while BT or the PCIe link is active, leaves the
+ * chip unable to boot BT and the link returning all-ones until the next reboot.
+ */
+static int g_ssi_dump_enable = 0;
+module_param_named(ssi_dump, g_ssi_dump_enable, int, 0644);
+MODULE_PARM_DESC(ssi_dump, "Dump chip registers over GPIO-SSI on errors (debug only)");
 
 
 #ifdef _PRE_HI_DRV_GPIO

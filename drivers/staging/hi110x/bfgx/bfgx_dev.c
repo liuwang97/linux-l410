@@ -141,7 +141,7 @@ int32_t ps_get_plat_reference(struct ps_plat_s **plat_data)
     pdev = g_hw_ps_device;
     if (pdev == NULL) {
         *plat_data = NULL;
-        ps_print_err("%s pdev is NULL\n", __func__);
+        ps_print_info("%s pdev is NULL\n", __func__);
         return FAILURE;
     }
 
@@ -170,7 +170,7 @@ struct ps_core_s *ps_get_core_reference(uint32_t type)
     }
 
     if (pdev == NULL) {
-        ps_print_err("%s pdev is NULL\n", __func__);
+        ps_print_info("%s pdev is NULL\n", __func__);
         return NULL;
     }
 
@@ -3084,7 +3084,7 @@ STATIC int32_t ps_probe(struct platform_device *pdev)
 
     err = plat_read_changid();
     if (err < 0) {
-        ps_print_err("plat_cust_init failed\n");
+        ps_print_info("plat_cust_init failed\n");
     }
 
     /* copying platform data */

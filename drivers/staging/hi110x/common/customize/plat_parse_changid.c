@@ -121,7 +121,7 @@ int32_t plat_parse_readme(uint8_t *path, uint8_t *buf)
 
     size = firmware_read_cfg(path, buf, CUST_README_BUFFER_SIZE);
     if (oal_unlikely(size < 0)) {
-        ps_print_err("read file fail\n");
+        ps_print_info("read file fail\n");
         return -EFAIL;
     }
 
@@ -161,7 +161,7 @@ int32_t plat_read_changid(void)
 
     ret = plat_parse_readme(path, buf);
     if (ret < 0) {
-        ps_print_err("plat cust get changid fail!\n");
+        ps_print_info("plat cust get changid fail!\n");
     }
 
     os_mem_kfree(buf);

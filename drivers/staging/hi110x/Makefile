@@ -66,8 +66,11 @@ plat-cflags := $(addprefix -I$(src)/,$(plat-inc)) \
 	$(HI110X_COMM_FLAGS) $(HI110X_PLAT_FLAGS) \
 	-DPLATFORM_TYPE_FOR_HI110X=0 -DPLATFORM_HI110X_k3v2oem1=1 -DPLATFORM_HI110X_UEDGE=2 \
 	-DHI1XX_OS_BUILD_VARIANT_ROOT=1 -DHI1XX_OS_BUILD_VARIANT_USER=2 \
-	-DOS_HI1XX_BUILD_VERSION=HI1XX_OS_BUILD_VARIANT_ROOT \
+	-DOS_HI1XX_BUILD_VERSION=HI1XX_OS_BUILD_VARIANT_USER \
 	-DHAVE_HISI_BT
+# User build: the "root" variant turns every chip error into GPIO-SSI register dumps
+# (which themselves upset the chip's clocks and the PCIe link), bus-exception memory
+# dumps and the factory AT-command ioctl.
 # The vendor also set HAVE_HISI_FM/GNSS/IR (/dev/hwfm, /dev/hwgnss, /dev/hwir); the
 # laptop has no FM/GNSS antenna or IR blaster, so those host interfaces are left out.
 
@@ -121,7 +124,7 @@ wifi-cflags := $(addprefix -I$(src)/,$(wifi-inc)) \
 	$(HI110X_COMM_FLAGS) $(HI110X_WIFI_FLAGS)
 
 # ---------------------------------------------------------------- module
-hi110x-glue := hi110x_main.o hi110x_compat.o hi110x_eeprom.o hi110x_stubs.o
+hi110x-glue := hi110x_main.o hi110x_compat.o hi110x_log.o hi110x_eeprom.o hi110x_stubs.o
 hi110x-y := $(hi110x-glue) $(plat-objs) $(wifi-objs)
 
 # CONFIG_ARCH_KIRIN_PCIE was a vendor Kconfig symbol (=y) tested by the C code: the

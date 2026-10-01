@@ -3193,7 +3193,7 @@ int32_t oal_wifi_platform_load_sdio(void)
 {
     if (oal_sdio_110x_working_check() != OAL_TRUE) {
         /* sdio driver don't support */
-        oal_print_hi11xx_log(HI11XX_LOG_ERR, "sdio driver don't support");
+        oal_print_hi11xx_log(HI11XX_LOG_INFO, "sdio driver don't support");
         return OAL_SUCC;
     }
 #ifdef CONFIG_MMC

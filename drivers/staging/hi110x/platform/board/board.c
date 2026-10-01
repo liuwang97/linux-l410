@@ -187,7 +187,7 @@ int32_t get_board_dts_node(struct device_node **np, const char *node_prop)
 
     *np = of_find_compatible_node(NULL, NULL, node_prop);
     if (*np == NULL) {
-        ps_print_err("No compatible node %s found.\n", node_prop);
+        ps_print_info("No compatible node %s found.\n", node_prop);
         return BOARD_FAIL;
     }
 
@@ -205,7 +205,7 @@ int32_t get_board_dts_prop(struct device_node *np, const char *dts_prop, const c
 
     ret = of_property_read_string(np, dts_prop, prop_val);
     if (ret) {
-        ps_print_err("can't get dts_prop value: dts_prop=%s\n", dts_prop);
+        ps_print_info("can't get dts_prop value: dts_prop=%s\n", dts_prop);
         return ret;
     }
 
@@ -223,7 +223,7 @@ int32_t get_board_dts_gpio_prop(struct device_node *np, const char *dts_prop, in
 
     ret = of_get_named_gpio(np, dts_prop, 0);
     if (ret < 0) {
-        ps_print_err("can't get dts_prop value: dts_prop=%s, ret=%d\n", dts_prop, ret);
+        ps_print_info("can't get dts_prop value: dts_prop=%s, ret=%d\n", dts_prop, ret);
         return ret;
     }
 
@@ -1049,7 +1049,7 @@ static int32_t get_ssi_dump_cfg(void)
     /* 获取ini的配置值 */
     l_ret = get_cust_conf_int32(INI_MODU_PLAT, INI_SSI_DUMP_EN, &l_cfg_value);
     if (l_ret == INI_FAILED) {
-        ps_print_err("get_ssi_dump_cfg: fail to get ini, keep disable\n");
+        ps_print_info("get_ssi_dump_cfg: fail to get ini, keep disable\n");
         return BOARD_SUCC;
     }
 
@@ -1099,7 +1099,7 @@ STATIC void buck_param_init_by_ini(void)
     /* 获取ini的配置值 */
     l_ret = get_cust_conf_int32(INI_MODU_PLAT, "buck_mode", &l_cfg_value);
     if (l_ret == INI_FAILED) {
-        ps_print_err("get_ssi_dump_cfg: fail to get ini, keep disable\n");
+        ps_print_info("get_ssi_dump_cfg: fail to get ini, keep disable\n");
         return;
     }
 
@@ -1145,7 +1145,7 @@ STATIC void buck_param_init(void)
         ps_print_info("buck_param_init get dts config:0x%x\n", buck_mode);
         g_st_board_info.buck_param = (uint16_t)buck_mode;
     } else {
-        ps_print_err("buck_param_init fail,get from ini\n");
+        ps_print_info("buck_param_init fail,get from ini\n");
         return  buck_param_init_by_ini();
     }
 
@@ -1426,9 +1426,13 @@ hi110x_release_vtype hi110x_get_release_type(void)
         return HI110X_VTYPE_RELEASE;
     }
 #else
-    /* kernel module or no beta user function */
+    /*
+     * kernel module or no beta user function: a user build is a release build (no
+     * GPIO-SSI register dumps on chip errors, see ssi_get_err_dump_level())
+     */
     ps_print_dbg("default user\n");
-    vtype = HI110X_VTYPE_DEBUG;
+    vtype = (hi11xx_get_os_build_variant() == HI1XX_OS_BUILD_VARIANT_USER) ?
+            HI110X_VTYPE_RELEASE : HI110X_VTYPE_DEBUG;
 #endif
 
     return vtype;
