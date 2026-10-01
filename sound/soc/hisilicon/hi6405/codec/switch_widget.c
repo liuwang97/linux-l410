@@ -17,15 +17,14 @@
 #include "asoc_adapter.h"
 #include "slimbus.h"
 #include "slimbus_6405.h"
-#include "linux/hisi/audio_log.h"
-#include "linux/hisi/hi64xx/da_combine_v5.h"
-#include "linux/hisi/hi64xx/da_combine_v5_regs.h"
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
-#include "linux/hisi/hi64xx/hi64xx_utils.h"
+#include "hi6405_compat.h"
+#include "hi64xx/da_combine_v5.h"
+#include "hi64xx/da_combine_v5_regs.h"
+#include "hi64xx/da_combine_v5_type.h"
+#include "hi64xx/hi64xx_utils.h"
 #include "path_widget.h"
 #include "switch_widget_utils.h"
 
-#include "huawei_platform/power/vsys_switch/vsys_switch.h"
 
 /* SWITCH - AUDIODOWN */
 static const struct snd_kcontrol_new dapm_play44k1_switch_controls =

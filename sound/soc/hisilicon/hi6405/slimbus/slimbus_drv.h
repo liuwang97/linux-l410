@@ -20,7 +20,6 @@
 #include <linux/types.h>
 #include "csmi.h"
 #include "slimbus_types.h"
-#include "slimbus_debug.h"
 
 /* address of soc generic device */
 #define SOC_EA_GENERIC_DEVICE						0xaaaac1000200
@@ -67,7 +66,7 @@ extern int slimbus_drv_reset_bus(void);
 
 extern int slimbus_drv_shutdown_bus(void);
 
-extern volatile bool slimbus_int_need_clear_get(void);
+extern bool slimbus_int_need_clear_get(void);
 
 extern void slimbus_int_need_clear_set(volatile bool flag);
 

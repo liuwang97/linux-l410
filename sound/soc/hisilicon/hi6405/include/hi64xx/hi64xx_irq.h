@@ -21,7 +21,7 @@
 
 #include <linux/device.h>
 #include <linux/interrupt.h>
-#include <linux/hisi/hi64xx/hi_cdc_ctrl.h>
+#include "hi64xx/hi_cdc_ctrl.h"
 
 enum hi64xx_irq_type {
 	IRQ_BTNUP_COMP1 = 0,

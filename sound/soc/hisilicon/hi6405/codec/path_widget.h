@@ -13,7 +13,7 @@
 
 #include <sound/soc.h>
 
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
+#include "hi64xx/da_combine_v5_type.h"
 
 enum headset_path {
 	HEADSET_LEFT = 0x1,

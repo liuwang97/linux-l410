@@ -22,9 +22,8 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/delay.h>
-#include <dsm/dsm_pub.h>
 
-#include "linux/hisi/audio_log.h"
+#include "hi6405_compat.h"
 #include "slimbus_utils.h"
 #include "csmi.h"
 #include "slimbus.h"

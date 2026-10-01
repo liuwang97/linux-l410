@@ -29,10 +29,8 @@
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
 #include <linux/pinctrl/consumer.h>
-#include "linux/hisi/audio_log.h"
-#include <rdr_hisi_audio_adapter.h>
+#include "hi6405_compat.h"
 #ifdef CONFIG_HUAWEI_DSM
-#include <dsm_audio/dsm_audio.h>
 #endif
 #include "slimbus.h"
 #include "slimbus_types.h"
@@ -131,7 +129,6 @@ static int32_t slimbus_suspend(struct device *device)
 		pm_ret = pm_runtime_get_sync(device);
 		if (pm_ret < 0) {
 			AUDIO_LOGE("pm resume error, pm_ret: %d", pm_ret);
-			rdr_system_error(RDR_AUDIO_RUNTIME_SYNC_FAIL_MODID, 0, 0);
 			return pm_ret;
 		}
 	}

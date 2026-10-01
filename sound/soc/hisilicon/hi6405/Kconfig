@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config SND_SOC_HI6405_L410
+	tristate "HiSilicon Hi6405 codec on Kirin 990 (Huawei L410)"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on OF && GPIOLIB && COMMON_CLK
+	select REGMAP
+	help
+	  Audio support for the Huawei Qingyun L410 (Kirin 990): the Hi6405
+	  codec (register access over the codec SSI, audio data over the
+	  Cadence SLIMbus manager in the ASP), the ASP DMA based PCM and the
+	  machine driver binding the codec and the TAS2562 speaker amplifiers.

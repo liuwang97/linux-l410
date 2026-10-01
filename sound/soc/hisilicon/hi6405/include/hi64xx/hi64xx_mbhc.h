@@ -19,10 +19,9 @@
 #ifndef __HI64XX_MBHC_H__
 #define __HI64XX_MBHC_H__
 
-#include <linux/hisi/hi64xx/hi64xx_irq.h>
-#include <linux/hisi/hi64xx/hi64xx_utils.h>
-#include <linux/hisi/hi64xx/hi64xx_resmgr.h>
-#include "hi64xx_mbhc_rear_jack.h"
+#include "hi64xx/hi64xx_irq.h"
+#include "hi64xx/hi64xx_utils.h"
+#include "hi64xx/hi64xx_resmgr.h"
 
 enum hisi_jack_states {
 	HISI_JACK_NONE = 0,     /* unpluged */

@@ -16,7 +16,7 @@
  *
  */
 
-#include <linux/hisi/hi64xx/hi64xx_mbhc.h>
+#include "hi64xx/hi64xx_mbhc.h"
 
 #include <linux/kernel.h>
 #include <linux/device.h>
@@ -26,27 +26,40 @@
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/of_device.h>
-#include <linux/miscdevice.h>
 #include <linux/input.h>
-#include <linux/version.h>
 #include <linux/types.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
+#include <linux/pm_wakeup.h>
+#include <linux/slab.h>
+#include <linux/workqueue.h>
 #include <sound/jack.h>
 #ifdef CONFIG_HUAWEI_DSM
-#include <dsm_audio/dsm_audio.h>
 #endif
-#include <linux/hisi/audio_log.h>
-#include <linux/hisi/hi64xx/hi64xx_regs.h>
-#include <linux/hisi/hi64xx/hi64xx_mbhc_rear_jack.h>
-#include "huawei_platform/audio/anc_hs_interface.h"
-#include "huawei_platform/audio/invert_hs.h"
-#include "huawei_platform/audio/usb_analog_hs_interface.h"
-#include "huawei_platform/audio/ana_hs_common.h"
-#include "ana_hs_kit/ana_hs.h"
+#include "hi6405_compat.h"
+#include "hi64xx/hi64xx_regs.h"
 #include "asoc_adapter.h"
-#include "hs_auto_calib.h"
 
 #define LOG_TAG "DA_combine_mbhc"
+
+/*
+ * The vendor kernel shares plug detection with USB-C / external analog
+ * headset switch drivers; none of those exist on the L410.
+ */
+enum {
+	ANA_HS_NORMAL_4POLE,
+	ANA_HS_NORMAL_3POLE,
+	ANA_HS_REVERT_4POLE,
+};
+#define ANA_HS_PLUG_IN 1
+static inline bool check_usb_analog_hs_support(void) { return false; }
+static inline bool ana_hs_support_usb_sw(void) { return false; }
+static inline int usb_analog_hs_check_headset_pluged_in(void) { return 0; }
+static inline int ana_hs_pluged_state(void) { return 0; }
+static inline void ana_hs_refresh_headset_type(int type) { }
+static inline void usb_ana_hs_mic_switch_change_state(void) { }
+static inline void ana_hs_mic_gnd_swap(void) { }
+static inline void headset_auto_calib_reset_interzone(void) { }
+static inline void headset_auto_calib_init(struct device_node *np) { }
 
 #define JACK_BTN_MASK (SND_JACK_BTN_0 | SND_JACK_BTN_1 | SND_JACK_BTN_2 | SND_JACK_BTN_3)
 #define CLR_IRQ_COMHL_ECO_STATUS        0x3F
@@ -92,7 +105,7 @@ struct hp_extern {
 };
 
 struct mbhc_hs_ctrl_gpio_cfg {
-	unsigned int gpio;
+	unsigned int gpio;	/* vendor global GPIO number, informational */
 	int jack_none_value;
 	int jack_headset_value;
 	int jack_invert_value;
@@ -100,7 +113,8 @@ struct mbhc_hs_ctrl_gpio_cfg {
 
 struct mbhc_hs_type_ctrl {
 	int gpio_num;
-	struct gpio *gpio_array;
+	struct gpio_desc *gpio_array[HS_CTRL_GPIO_MAX_NUM];
+	bool enabled;
 	struct mbhc_hs_ctrl_gpio_cfg gpio_cfg_array[HS_CTRL_GPIO_MAX_NUM];
 };
 
@@ -139,10 +153,9 @@ struct hi64xx_mbhc_priv {
 	struct snd_soc_component *codec;
 	struct hi64xx_resmgr *resmgr;
 	struct hi64xx_irq *irqmgr;
-	struct miscdevice miscdev;
-	struct wakeup_source wake_lock;
-	struct wakeup_source micbias_wake_lock;
-	struct wakeup_source timeout_wake_lock;
+	struct wakeup_source *wake_lock;
+	struct wakeup_source *micbias_wake_lock;
+	struct wakeup_source *timeout_wake_lock;
 	struct mutex plug_mutex;
 	struct mutex status_mutex;
 	struct mutex saradc_mutex;
@@ -234,7 +247,7 @@ static void hs_micbias_enable(struct hi64xx_mbhc_priv *priv, bool enable)
 		return;
 	}
 
-	__pm_wakeup_event(&priv->micbias_wake_lock, MICBIAS_WAKEUP_TIME_MS);
+	__pm_wakeup_event(priv->micbias_wake_lock, MICBIAS_WAKEUP_TIME_MS);
 	ret = mod_delayed_work(priv->micbias_delay_wq,
 		&priv->micbias_delay_work,
 		msecs_to_jiffies(MICBIAS_DELAYED_WORK_TIME_MS));
@@ -287,12 +300,6 @@ static int get_hs_ctrl_gpio_cfg(struct hi64xx_mbhc_priv *priv,
 	}
 
 	for (i = 0; i < gpio_num; i++) {
-		if (gpio_is_valid(gpio_cfg_array[i].gpio) == 0) {
-			AUDIO_LOGE("gpio pin: %u is invalid",
-				gpio_cfg_array[i].gpio);
-			return -EIO;
-		}
-
 		AUDIO_LOGI("read gpio: %u, jack none value is: %d",
 			gpio_cfg_array[i].gpio,
 			gpio_cfg_array[i].jack_none_value);
@@ -318,11 +325,12 @@ static int get_hs_ctrl_gpio_cfg(struct hi64xx_mbhc_priv *priv,
 	return 0;
 }
 
+/* headset type (CTIA/OMTP) switch control lines: DT "hs-type-gpios" */
 static void headset_type_ctrl_gpio_init(struct hi64xx_mbhc_priv *priv,
 	const struct device_node *node)
 {
 	struct mbhc_hs_type_ctrl *hs_ctrl = &priv->hs_type_ctrl;
-	struct gpio *gpio_array = NULL;
+	struct device *dev = priv->codec->dev;
 	int ret;
 	int i;
 
@@ -332,45 +340,24 @@ static void headset_type_ctrl_gpio_init(struct hi64xx_mbhc_priv *priv,
 		return;
 	}
 
-	gpio_array = kzalloc(hs_ctrl->gpio_num * sizeof(*gpio_array), GFP_KERNEL);
-	if (gpio_array == NULL) {
-		AUDIO_LOGE("kzalloc failed");
-		return;
-	}
-
 	for (i = 0; i < hs_ctrl->gpio_num; ++i) {
-		gpio_array[i].gpio = hs_ctrl->gpio_cfg_array[i].gpio;
-		gpio_array[i].label = "hi64xx headset type ctrl";
-
-		if (hs_ctrl->gpio_cfg_array[i].jack_none_value)
-			gpio_array[i].flags = GPIOF_OUT_INIT_HIGH;
-		else
-			gpio_array[i].flags = GPIOF_OUT_INIT_LOW;
+		hs_ctrl->gpio_array[i] = devm_gpiod_get_index(dev, "hs-type", i,
+			hs_ctrl->gpio_cfg_array[i].jack_none_value ?
+			GPIOD_OUT_HIGH : GPIOD_OUT_LOW);
+		if (IS_ERR(hs_ctrl->gpio_array[i])) {
+			AUDIO_LOGW("no hs-type gpio %d: %ld", i,
+				PTR_ERR(hs_ctrl->gpio_array[i]));
+			return;
+		}
 	}
 
-	ret = gpio_request_array(gpio_array, hs_ctrl->gpio_num);
-	if (ret != 0) {
-		AUDIO_LOGE("gpio request array failed with error %d", ret);
-		kfree(gpio_array);
-		return;
-	}
-
-	hs_ctrl->gpio_array = gpio_array;
+	hs_ctrl->enabled = true;
 	AUDIO_LOGI("ok");
 }
 
 static void headset_type_ctrl_gpio_deinit(struct hi64xx_mbhc_priv *priv)
 {
-	struct mbhc_hs_type_ctrl *hs_ctrl = &priv->hs_type_ctrl;
-
-	if (hs_ctrl->gpio_array == NULL) {
-		AUDIO_LOGW("headset type control is disable");
-		return;
-	}
-
-	gpio_free_array(hs_ctrl->gpio_array, hs_ctrl->gpio_num);
-	kfree(hs_ctrl->gpio_array);
-	hs_ctrl->gpio_array = NULL;
+	priv->hs_type_ctrl.enabled = false;
 }
 
 static int set_gpio_value(int status, const struct hi64xx_mbhc_priv *priv)
@@ -380,8 +367,8 @@ static int set_gpio_value(int status, const struct hi64xx_mbhc_priv *priv)
 	int gpio_value;
 	int i;
 
-	if (hs_ctrl->gpio_array == NULL) {
-		AUDIO_LOGW("headset type control is disable");
+	if (!hs_ctrl->enabled) {
+		AUDIO_LOGD("headset type control is disable");
 		return 0;
 	}
 
@@ -399,7 +386,7 @@ static int set_gpio_value(int status, const struct hi64xx_mbhc_priv *priv)
 			return -EINVAL;
 		}
 
-		gpio_set_value_cansleep(gpio_cfg_array[i].gpio, gpio_value);
+		gpiod_set_value_cansleep(hs_ctrl->gpio_array[i], gpio_value);
 		AUDIO_LOGI("set gpio %u to %d", gpio_cfg_array[i].gpio, gpio_value);
 	}
 
@@ -423,8 +410,8 @@ static void set_4_pole_headset_type(struct hi64xx_mbhc_priv *priv)
 	struct hi64xx_mbhc *mbhc = (struct hi64xx_mbhc *)priv;
 	unsigned int interval_ms = 0;
 
-	if (hs_ctrl->gpio_array == NULL) {
-		AUDIO_LOGW("headset type control is disable");
+	if (!hs_ctrl->enabled) {
+		AUDIO_LOGD("headset type control is disable");
 		return;
 	}
 
@@ -743,7 +730,7 @@ static void plug_in_detect(struct hi64xx_mbhc_priv *priv)
 
 	set_default_jack(priv);
 
-	__pm_stay_awake(&priv->wake_lock);
+	__pm_stay_awake(priv->wake_lock);
 	mutex_lock(&priv->plug_mutex);
 
 	AUDIO_LOGD("in");
@@ -776,8 +763,8 @@ static void plug_in_detect(struct hi64xx_mbhc_priv *priv)
 
 exit:
 	mutex_unlock(&priv->plug_mutex);
-	__pm_wakeup_event(&priv->timeout_wake_lock, PLUGIN_WAKE_DELAY_TIME_MS);
-	__pm_relax(&priv->wake_lock);
+	__pm_wakeup_event(priv->timeout_wake_lock, PLUGIN_WAKE_DELAY_TIME_MS);
+	__pm_relax(priv->wake_lock);
 }
 
 static const struct voltage_btn_report g_btn_report_map[] = {
@@ -823,7 +810,7 @@ static void btn_down(struct hi64xx_mbhc_priv *priv)
 		return;
 	}
 
-	__pm_stay_awake(&priv->wake_lock);
+	__pm_stay_awake(priv->wake_lock);
 
 	if (priv->hs_status == HISI_JACK_HEADSET) {
 		hs_micbias_enable(priv, true);
@@ -855,8 +842,6 @@ static void btn_down(struct hi64xx_mbhc_priv *priv)
 			goto end;
 		}
 
-		startup_fsm(REC_JUDGE, voltage, &(priv->btn_report));
-
 voice_assistant_key:
 		/* btn report key event */
 		AUDIO_LOGI("btn report type: %d, status: %d",
@@ -865,7 +850,7 @@ voice_assistant_key:
 	}
 
 end:
-	__pm_relax(&priv->wake_lock);
+	__pm_relax(priv->wake_lock);
 }
 
 static irqreturn_t plug_in_handler(int irq, void *data)
@@ -1042,7 +1027,7 @@ static irqreturn_t btn_up_eco_handler(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
-	__pm_wakeup_event(&priv->wake_lock,
+	__pm_wakeup_event(priv->wake_lock,
 		jiffies_to_msecs(BTN_UP_ECO_WAKE_LOCK_HZ));
 
 	if (priv->hs_status == HISI_JACK_INVERT) {
@@ -1076,83 +1061,6 @@ static irqreturn_t btn_down_eco_handler(int irq, void *data)
 
 	return IRQ_HANDLED;
 }
-
-
-static bool mbhc_check_headset_in(void *priv)
-{
-	struct hi64xx_mbhc_priv *data = priv;
-
-	if (priv == NULL) {
-		AUDIO_LOGE("priv is null");
-		return false;
-	}
-
-	return is_headset_pluged_in(data);
-}
-
-static void mbhc_plug_in_detect(void *priv)
-{
-	struct hi64xx_mbhc_priv *data = priv;
-
-	if (priv == NULL) {
-		AUDIO_LOGE("priv is null");
-		return;
-	}
-
-	hi64xx_irq_resume_wait(data->irqmgr);
-
-	plug_in_detect(data);
-}
-
-static void mbhc_plug_out_detect(void *priv)
-{
-	struct hi64xx_mbhc_priv *data = priv;
-
-	if (priv == NULL) {
-		AUDIO_LOGE("null pointer");
-		return;
-	}
-
-	hi64xx_irq_resume_wait(data->irqmgr);
-
-	plug_out_detect(data);
-}
-
-static int get_mbhc_headset_type(void *priv)
-{
-	struct hi64xx_mbhc_priv *data = priv;
-
-	if (priv == NULL) {
-		AUDIO_LOGE("null pointer");
-		return -1;
-	}
-
-	return (int)(data->hs_status);
-}
-
-static void enable_high_resistence(void *priv, bool enable)
-{
-	struct hi64xx_mbhc_priv *data = priv;
-
-	if (priv == NULL) {
-		AUDIO_LOGE("null pointer");
-		return;
-	}
-
-	hi64xx_resmgr_hs_high_resistence_enable(data->resmgr, enable);
-}
-
-
-static struct ana_hs_codec_dev g_ana_hs_dev = {
-	.name = "ana_hs",
-	.ops = {
-		.check_headset_in = mbhc_check_headset_in,
-		.plug_in_detect = mbhc_plug_in_detect,
-		.plug_out_detect = mbhc_plug_out_detect,
-		.get_headset_type = get_mbhc_headset_type,
-		.hs_high_resistence_enable = enable_high_resistence,
-	},
-};
 
 
 static const struct cfg_node_info g_hs_cfg[] = {
@@ -1257,20 +1165,12 @@ static void set_mbhc_config(struct device_node *node,
 
 static struct snd_soc_jack_pin g_headset_jack_pins[] = {
 	{
-		.pin = "Headset Mic Jack",
-		.mask = SND_JACK_MICROPHONE,
-	},
-	{
-		.pin = "Headphone Jack",
+		.pin = "Headphone",
 		.mask = SND_JACK_HEADPHONE,
 	},
 	{
-		.pin = "Speaker Jack",
-		.mask = SND_JACK_LINEOUT,
-	},
-	{
-		.pin = "Mic Jack",
-		.mask = SND_JACK_LINEIN,
+		.pin = "Headset Mic",
+		.mask = SND_JACK_MICROPHONE,
 	},
 };
 
@@ -1284,26 +1184,11 @@ static int register_hs_jack_btn(struct snd_soc_component *codec,
 		{ SND_JACK_BTN_1, KEY_VOLUMEUP },
 		{ SND_JACK_BTN_2, KEY_VOLUMEDOWN },
 		{ SND_JACK_BTN_3, KEY_VOICECOMMAND },
-		{ SND_JACK_BTN_5, KEY_F14 },
 	};
 
-	/* register headset jack */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0)
-	if (mbhc_config->hs_report_line_in_out) {
-		int status = SND_JACK_LINEIN | SND_JACK_LINEOUT;
-
-		ret = snd_soc_card_jack_new(codec->card, "Headset Jack",
-			SND_JACK_HEADSET | SND_JACK_LINEIN | SND_JACK_LINEOUT,
-			&g_hs_jack, g_headset_jack_pins, ARRAY_SIZE(g_headset_jack_pins));
-		report_soc_jack(status, SND_JACK_HEADSET |
-			SND_JACK_LINEIN | SND_JACK_LINEOUT);
-	} else {
-		ret = snd_soc_card_jack_new(codec->card,
-			"Headset Jack", SND_JACK_HEADSET, &g_hs_jack, NULL, 0);
-	}
-#else
-	ret = snd_soc_jack_new(codec, "Headset Jack", SND_JACK_HEADSET, &g_hs_jack);
-#endif
+	ret = snd_soc_card_jack_new_pins(codec->card, "Headset Jack",
+		SND_JACK_HEADSET | JACK_BTN_MASK, &g_hs_jack,
+		g_headset_jack_pins, ARRAY_SIZE(g_headset_jack_pins));
 	if (ret != 0) {
 		AUDIO_LOGE("jack error, error num: %d", ret);
 		return ret;
@@ -1326,14 +1211,8 @@ static int register_hs_jack_btn(struct snd_soc_component *codec,
 
 static void mbhc_first_detect(struct hi64xx_mbhc_priv *priv)
 {
-	if (is_headset_pluged_in(priv)) {
-		if (check_usb_analog_hs_support())
-			usb_analog_hs_plug_in_out_handle(ANA_HS_PLUG_IN);
-		else if (ana_hs_support_usb_sw())
-			ana_hs_plug_handle(ANA_HS_PLUG_IN);
-		else
-			plug_in_detect(priv);
-	}
+	if (is_headset_pluged_in(priv))
+		plug_in_detect(priv);
 }
 
 static int check_hs_cfg(const struct hi64xx_hs_cfg *hs_cfg)
@@ -1401,14 +1280,16 @@ static void release_irq_all(struct hi64xx_mbhc_priv *priv)
 		hi64xx_irq_free_irq(priv->irqmgr, IRQ_BTNDOWN_ECO, priv);
 		hi64xx_irq_free_irq(priv->irqmgr, IRQ_BTNDOWN_COMP1, priv);
 		hi64xx_irq_free_irq(priv->irqmgr, IRQ_BTNUP_COMP1, priv);
+		hi64xx_irq_free_irq(priv->irqmgr, IRQ_BTNDOWN_COMP2, priv);
+		hi64xx_irq_free_irq(priv->irqmgr, IRQ_BTNUP_COMP2, priv);
 	}
 }
 
 static void mbhc_mutex_init(struct hi64xx_mbhc_priv *priv)
 {
-	wakeup_source_init(&priv->wake_lock, "hisi-64xx-mbhc");
-	wakeup_source_init(&priv->micbias_wake_lock, "hisi-64xx-mbhc-micbias");
-	wakeup_source_init(&priv->timeout_wake_lock, "hisi-64xx-mbhc-timeout");
+	priv->wake_lock = wakeup_source_register(NULL, "hisi-64xx-mbhc");
+	priv->micbias_wake_lock = wakeup_source_register(NULL, "hisi-64xx-mbhc-micbias");
+	priv->timeout_wake_lock = wakeup_source_register(NULL, "hisi-64xx-mbhc-timeout");
 	mutex_init(&priv->plug_mutex);
 	mutex_init(&priv->status_mutex);
 	mutex_init(&priv->saradc_mutex);
@@ -1416,9 +1297,9 @@ static void mbhc_mutex_init(struct hi64xx_mbhc_priv *priv)
 
 static void mbhc_mutex_deinit(struct hi64xx_mbhc_priv *priv)
 {
-	wakeup_source_trash(&priv->wake_lock);
-	wakeup_source_trash(&priv->micbias_wake_lock);
-	wakeup_source_trash(&priv->timeout_wake_lock);
+	wakeup_source_unregister(priv->wake_lock);
+	wakeup_source_unregister(priv->micbias_wake_lock);
+	wakeup_source_unregister(priv->timeout_wake_lock);
 	mutex_destroy(&priv->plug_mutex);
 	mutex_destroy(&priv->status_mutex);
 	mutex_destroy(&priv->saradc_mutex);
@@ -1453,10 +1334,6 @@ static void mbhc_workqueue_deinit(struct hi64xx_mbhc_priv *priv)
 static int hs_dev_register(struct hi64xx_mbhc_priv *priv,
 	struct snd_soc_component *codec)
 {
-	/* register anc hs first */
-	usb_analog_hs_dev_register(&g_ana_hs_dev, priv);
-	ana_hs_codec_dev_register(&g_ana_hs_dev, priv);
-
 	if (register_hs_jack_btn(codec, &priv->mbhc_config) != 0)
 		return -EINVAL;
 
@@ -1610,13 +1487,13 @@ int hi64xx_get_4_pole_headset_type(const struct hi64xx_mbhc *mbhc)
 	hs_ctrl = &priv->hs_type_ctrl;
 	gpio_cfg_array = hs_ctrl->gpio_cfg_array;
 
-	if (hs_ctrl->gpio_array == NULL) {
-		AUDIO_LOGW("headset type control is disable");
+	if (!hs_ctrl->enabled) {
+		AUDIO_LOGD("headset type control is disable");
 		return 0;
 	}
 
 	for (i = 0; i < hs_ctrl->gpio_num; ++i) {
-		gpio_cur_value = gpio_get_value(gpio_cfg_array[i].gpio);
+		gpio_cur_value = gpiod_get_value_cansleep(hs_ctrl->gpio_array[i]);
 		AUDIO_LOGI("get gpio %u value is %d",
 			hs_ctrl->gpio_cfg_array[i].gpio, gpio_cur_value);
 
@@ -1665,6 +1542,12 @@ bool hi64xx_check_saradc_ready_detection(struct snd_soc_component *codec)
 		return false;
 
 	return true;
+}
+
+static void mbhc_plug_in_detect(struct hi64xx_mbhc_priv *data)
+{
+	hi64xx_irq_resume_wait(data->irqmgr);
+	plug_in_detect(data);
 }
 
 void hi64xx_plug_in_detect_wrapper(struct hi64xx_mbhc *mbhc)
@@ -1743,8 +1626,6 @@ int hi64xx_mbhc_init(struct hi64xx_mbhc_cfg *mbhc_cfg,
 
 	g_mbhc_priv = priv;
 	*(mbhc_cfg->mbhc) = &priv->mbhc_pub;
-
-	rear_jack_init(priv->codec);
 
 	return ret;
 

@@ -16,19 +16,19 @@
  *
  */
 
-#include <linux/hisi/hi64xx/hi64xx_utils.h>
+#include "hi64xx/hi64xx_utils.h"
 
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/proc_fs.h>
 #include <linux/vmalloc.h>
-#include <linux/hisi/hi64xx/hi64xx_resmgr.h>
-#include <linux/hisi/audio_log.h>
+#include "hi64xx/hi64xx_resmgr.h"
+#include "hi6405_compat.h"
 
 #include "asoc_adapter.h"
 #ifdef CONFIG_SND_SOC_DA_COMBINE_V5
-#include <linux/hisi/hi64xx/da_combine_v5.h>
+#include "hi64xx/da_combine_v5.h"
 #else
 #define LOG_TAG "DA_combine_utils"
 #endif

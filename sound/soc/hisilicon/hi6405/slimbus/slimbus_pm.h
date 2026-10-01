@@ -19,6 +19,7 @@
 
 #include <linux/pm.h>
 
+extern const struct dev_pm_ops slimbus_pm_ops;
 const struct dev_pm_ops *slimbus_pm_get_ops(void);
 
 #endif /* __SLIMBUS__PM_H__ */

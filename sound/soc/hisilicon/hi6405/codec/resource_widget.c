@@ -15,12 +15,11 @@
 #include <sound/tlv.h>
 
 #include "asoc_adapter.h"
-#include "linux/hisi/audio_log.h"
-#include "linux/hisi/hi64xx/hi64xx_utils.h"
-#include "linux/hisi/hi64xx/da_combine_v5.h"
-#include "linux/hisi/hi64xx/da_combine_v5_regs.h"
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
-#include "huawei_platform/power/vsys_switch/vsys_switch.h"
+#include "hi6405_compat.h"
+#include "hi64xx/hi64xx_utils.h"
+#include "hi64xx/da_combine_v5.h"
+#include "hi64xx/da_combine_v5_regs.h"
+#include "hi64xx/da_combine_v5_type.h"
 
 #define CP2_DELAY_TIME 5
 
@@ -1238,7 +1237,8 @@ static int hsmicbias_power_event(struct snd_soc_dapm_widget *w,
 #define MICBIAS_WIDGET \
 	SND_SOC_DAPM_MIC("MICBIAS1_MIC", micbias1_power_event), \
 	SND_SOC_DAPM_MIC("MICBIAS2_MIC", micbias2_power_event), \
-	SND_SOC_DAPM_MIC("HSMICBIAS", hsmicbias_power_event), \
+	SND_SOC_DAPM_SUPPLY("HSMICBIAS", SND_SOC_NOPM, 0, 0, hsmicbias_power_event, \
+		(SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD)), \
 
 static const struct snd_soc_dapm_widget resource_widgets[] = {
 	PLL_WIDGET

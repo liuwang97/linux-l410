@@ -12,8 +12,8 @@
 
 #include <sound/core.h>
 
-#include "linux/hisi/audio_log.h"
-#include "linux/hisi/hi64xx/da_combine_v5.h"
+#include "hi6405_compat.h"
+#include "hi64xx/da_combine_v5.h"
 
 #define SINGLE_DP_SUPPLY_ROUTE \
 	{ "U1_OUTPUT",                    NULL,              "DP_CLK_SUPPLY" }, \
@@ -64,8 +64,6 @@
 	{ "Speaker Playback",             "Switch",          "AUDIO_PLAY_DRV" }, \
 	{ "S4_TX_DRV",                    NULL,              "Speaker Playback" }, \
 	{ "S4_TX_OUTPUT",                 NULL,              "S4_TX_DRV" }, \
-	{ "Speaker Playback",             "Switch",          "S4_RX_INPUT" }, \
-	{ "IV_DSPIF_OUTPUT",              NULL,              "Speaker Playback" }, \
 
 /* hp_route */
 #define SINGLE_PLAY_HP_ROUTE \
@@ -187,7 +185,6 @@ static const struct snd_soc_dapm_route single_route_map[] = {
 	SINGLE_BT_CAPTURE_ROUTE
 	SINGLE_BT_PLAYBACK_ROUTE_WB
 	SINGLE_BT_CAPTURE_ROUTE_WB
-	SINGLE_EC_ROUTE
 	SINGLE_CAPTURE_ROUTE
 };
 

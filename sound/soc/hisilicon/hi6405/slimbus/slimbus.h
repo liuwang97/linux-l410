@@ -180,7 +180,7 @@ extern void slimbus_logcount_set(uint32_t count);
 extern uint32_t slimbus_logcount_get(void);
 extern uint32_t slimbus_logtimes_get(void);
 extern void slimbus_logtimes_set(uint32_t times);
-extern volatile uint32_t slimbus_drv_lostms_get(void);
+extern uint32_t slimbus_drv_lostms_get(void);
 extern void slimbus_drv_lostms_set(uint32_t count);
 extern struct slimbus_device_info *slimbus_get_devices_info(enum slimbus_device device);
 extern bool slimbus_is_hi64xx_reset_in_kernel(void);

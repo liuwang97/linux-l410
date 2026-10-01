@@ -21,9 +21,8 @@
 #include <linux/io.h>
 #include <linux/mutex.h>
 #include <linux/delay.h>
-#include "linux/hisi/audio_log.h"
+#include "hi6405_compat.h"
 
-#include "asp_cfg.h"
 
 /*lint -e838 -e715 -e573*/
 

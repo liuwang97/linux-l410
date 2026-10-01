@@ -15,14 +15,13 @@
 
 #include "slimbus.h"
 #include "slimbus_6405.h"
-#include "linux/hisi/audio_log.h"
-#include "linux/hisi/hi64xx/da_combine_v5.h"
-#include "linux/hisi/hi64xx/da_combine_v5_regs.h"
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
-#include "linux/hisi/hi64xx/hi64xx_utils.h"
+#include "hi6405_compat.h"
+#include "hi64xx/da_combine_v5.h"
+#include "hi64xx/da_combine_v5_regs.h"
+#include "hi64xx/da_combine_v5_type.h"
+#include "hi64xx/hi64xx_utils.h"
 #include "path_widget.h"
 
-#include "huawei_platform/power/vsys_switch/vsys_switch.h"
 
 #define PA_2_IV_PARAM_CHANNEL  2
 

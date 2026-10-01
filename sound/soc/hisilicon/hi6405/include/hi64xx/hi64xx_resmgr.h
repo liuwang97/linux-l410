@@ -21,8 +21,8 @@
 
 #include <sound/soc.h>
 #include <linux/notifier.h>
-#include <linux/hisi/hi64xx/hi_cdc_ctrl.h>
-#include <linux/hisi/hi64xx/hi64xx_irq.h>
+#include "hi64xx/hi_cdc_ctrl.h"
+#include "hi64xx/hi64xx_irq.h"
 
 enum hi64xx_pll_type {
 	PLL_LOW,

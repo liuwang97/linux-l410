@@ -29,17 +29,15 @@
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
 #include <linux/pinctrl/consumer.h>
-#include "linux/hisi/audio_log.h"
-#include <rdr_hisi_audio_adapter.h>
+#include "hi6405_compat.h"
+#include "hi6405_drv.h"
 #ifdef CONFIG_HUAWEI_DSM
-#include <dsm_audio/dsm_audio.h>
 #endif
 
 #include "slimbus_utils.h"
 #include "slimbus_drv.h"
 #include "slimbus_pm.h"
 #include "slimbus_64xx.h"
-#include "slimbus_6403.h"
 #ifdef CONFIG_SND_SOC_DA_COMBINE_V5
 #include "slimbus_6405.h"
 #endif
@@ -419,7 +417,6 @@ int32_t slimbus_get_rpm(void)
 	if (pdata->pm_runtime_support) {
 		if (pm_runtime_get_sync(pdata->dev) < 0) {
 			AUDIO_LOGE("pm resume error");
-			rdr_system_error(RDR_AUDIO_RUNTIME_SYNC_FAIL_MODID, 0, 0);
 			return -ENODEV;
 		}
 	}
@@ -1057,7 +1054,6 @@ static int32_t slimbus_check_pm(uint32_t track)
 			ret = pm_runtime_get_sync(pdata->dev);
 			if (ret < 0) {
 				AUDIO_LOGE("pm resume error, track: %u, ret: %d", track, ret);
-				rdr_system_error(RDR_AUDIO_RUNTIME_SYNC_FAIL_MODID, 0, 0);
 				return ret;
 			}
 			if (!slimbus_trackstate_get()) {
@@ -1473,7 +1469,6 @@ int32_t slimbus_bus_configure(enum slimbus_bus_type type)
 		pm_ret = pm_runtime_get_sync(pdata->dev);
 		if (pm_ret < 0) {
 			AUDIO_LOGE("pm resume error, type: %d pm_ret: %d", type, pm_ret);
-			rdr_system_error(RDR_AUDIO_RUNTIME_SYNC_FAIL_MODID, 0, 0);
 			return pm_ret;
 		}
 	}
@@ -1677,12 +1672,8 @@ static void slimbus_hi64xx_register(struct slimbus_device_ops *dev_ops,
 	pd->track_config_table = track_config_table;
 	pd->slimbus_track_max = (uint32_t)SLIMBUS_TRACK_MAX;
 
-	if (pd->device_type == SLIMBUS_DEVICE_HI6403)
-		slimbus_hi6403_callback_register(dev_ops, pd);
-#ifdef CONFIG_SND_SOC_DA_COMBINE_V5
-	else if (pd->device_type == SLIMBUS_DEVICE_HI6405)
+	if (pd->device_type == SLIMBUS_DEVICE_HI6405)
 		slimbus_hi6405_callback_register(dev_ops, pd);
-#endif
 }
 
 static int32_t slimbus_clk_enable(struct platform_device *pdev, struct slimbus_private_data *pd)
@@ -2119,16 +2110,11 @@ map_asp_err:
 	return -EFAULT;
 }
 
-static int32_t slimbus_remove(struct platform_device *pdev)
+static void slimbus_remove(struct platform_device *pdev)
 {
 	int32_t ret;
 	struct slimbus_private_data *pd = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
-
-	if (!pd) {
-		AUDIO_LOGE("pd is null");
-		return -EINVAL;
-	}
 
 	if (pd->pm_runtime_support) {
 		pm_runtime_resume(dev);
@@ -2140,17 +2126,19 @@ static int32_t slimbus_remove(struct platform_device *pdev)
 		AUDIO_LOGE("switch framer to SLIMBUS_DEVICE_SOC fail, ret: %d", ret);
 
 	slimbus_drv_release(pd->irq);
-
 	pd->dev_ops->release_slimbus_device(slimbus_devices[pd->device_type]);
-
 	slimbus_asp_power_deinit(pd);
 	release_slimbus_resource(pd);
 	platform_set_drvdata(pdev, NULL);
+	pdata = NULL;
 
 	if (pd->pm_runtime_support)
 		pm_runtime_set_suspended(dev);
+}
 
-	return 0;
+bool slimbus_is_ready(void)
+{
+	return pdata != NULL;
 }
 
 static const struct of_device_id slimbus_match[] = {
@@ -2161,35 +2149,12 @@ static const struct of_device_id slimbus_match[] = {
 };
 MODULE_DEVICE_TABLE(of, slimbus_match);
 
-static struct platform_driver slimbus_driver = {
+struct platform_driver hisi_slimbus_driver = {
 	.probe = slimbus_probe,
 	.remove = slimbus_remove,
 	.driver = {
 		.name = "hisilicon,slimbus",
-		.owner = THIS_MODULE,
 		.of_match_table = slimbus_match,
+		.pm = &slimbus_pm_ops,
 	},
 };
-
-static int32_t __init slimbus_init(void)
-{
-	int32_t ret;
-
-	slimbus_driver.driver.pm = slimbus_pm_get_ops();
-	ret = platform_driver_register(&slimbus_driver);
-	if (ret)
-		AUDIO_LOGE("driver register failed");
-
-	return ret;
-}
-
-static void __exit slimbus_exit(void)
-{
-	platform_driver_unregister(&slimbus_driver);
-}
-fs_initcall(slimbus_init);
-module_exit(slimbus_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Hisilicon");
-

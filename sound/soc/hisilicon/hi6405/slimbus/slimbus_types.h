@@ -19,6 +19,7 @@
 
 #include <linux/types.h>
 #include <linux/mutex.h>
+#include "slimbus_debug.h"
 
 /* max channel number supported */
 #define SLIMBUS_MAX_CHANNELS 16

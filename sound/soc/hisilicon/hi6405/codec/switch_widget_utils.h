@@ -13,7 +13,7 @@
 
 #include <sound/soc.h>
 
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
+#include "hi64xx/da_combine_v5_type.h"
 
 
 int play_config_power_event(unsigned int rate, struct snd_soc_component *codec, int event);

@@ -8,7 +8,7 @@
  * only version 2 as published by the Free Software Foundation.
  */
 
-#include "linux/hisi/hi64xx/da_combine_v5.h"
+#include "hi64xx/da_combine_v5.h"
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -18,8 +18,6 @@
 #include <linux/of_device.h>
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
-#include <linux/gpio.h>
-#include <linux/version.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/initval.h>
@@ -30,24 +28,21 @@
 #include <linux/dmi.h>
 
 #ifdef CONFIG_HUAWEI_DSM
-#include <dsm_audio/dsm_audio.h>
 #endif
-#include "linux/hisi/audio_log.h"
+#include "hi6405_compat.h"
 #include "slimbus.h"
 #include "slimbus_6405.h"
 #ifdef CONFIG_SND_SOC_HICODEC_DEBUG
-#include "debug.h"
 #endif
 #include "asoc_adapter.h"
-#include "linux/hisi/hi64xx/hi64xx_compat.h"
-#include "linux/hisi/hi64xx/hi64xx_resmgr.h"
-#include "linux/hisi/hi64xx/da_combine_v5_regs.h"
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
-#include <linux/hisi/hi64xx_dsp/hi64xx_dsp_misc.h>
+#include "hi64xx/hi64xx_resmgr.h"
+#include "hi64xx/da_combine_v5_regs.h"
+#include "hi64xx/da_combine_v5_type.h"
 #include "path_widget.h"
 #include "codec_probe.h"
 #include "utils.h"
 #include "codec_pm.h"
+#include "hi6405_drv.h"
 #include "switch_widget_utils.h"
 
 #define HISI_HI6405_CODEC_NAME "hi6405-codec"
@@ -134,7 +129,7 @@ static void update_dac_power_state(struct snd_soc_component *codec, bool on)
 	}
 }
 
-static int da_combine_v5_audio_digital_mute(struct snd_soc_dai *dai, int mute)
+static int da_combine_v5_audio_digital_mute(struct snd_soc_dai *dai, int mute, int stream)
 {
 	struct snd_soc_component *codec = dai->component;
 
@@ -158,7 +153,8 @@ static int da_combine_v5_audio_hw_free(struct snd_pcm_substream *substream,
 struct snd_soc_dai_ops da_combine_v5_audio_dai_ops = {
 	.hw_params = da_combine_v5_audio_hw_params,
 	.hw_free = da_combine_v5_audio_hw_free,
-	.digital_mute = da_combine_v5_audio_digital_mute,
+	.mute_stream = da_combine_v5_audio_digital_mute,
+	.no_capture_mute = 1,
 };
 
 struct snd_soc_dai_ops da_combine_v5_audio_bt_dai_ops = {
@@ -202,6 +198,22 @@ static int da_combine_v5_voice_hw_free(struct snd_pcm_substream *substream,
 {
 	return 0;
 }
+
+static int da_combine_v5_s4_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
+{
+	return 0;
+}
+
+static int da_combine_v5_s4_hw_params(struct snd_pcm_substream *substream,
+	struct snd_pcm_hw_params *params, struct snd_soc_dai *dai)
+{
+	return params_rate(params) == 48000 ? 0 : -EINVAL;
+}
+
+static const struct snd_soc_dai_ops da_combine_v5_s4_dai_ops = {
+	.set_fmt = da_combine_v5_s4_set_fmt,
+	.hw_params = da_combine_v5_s4_hw_params,
+};
 
 struct snd_soc_dai_ops da_combine_v5_voice_dai_ops = {
 	.hw_params = da_combine_v5_voice_hw_params,
@@ -286,9 +298,19 @@ struct snd_soc_dai_driver da_combine_v5_dai_pc[] = {
 			.formats = DA_COMBINE_V5_FORMATS },
 		.ops = &da_combine_v5_audio_bt_dai_ops,
 	},
+	{
+		/* I2S4 towards the smart PAs, clock provider */
+		.name = "DA_combine_v5-s4-dai",
+		.capture = {
+			.stream_name = "S4 TX",
+			.channels_min = 2,
+			.channels_max = 2,
+			.rates = SNDRV_PCM_RATE_48000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S32_LE },
+		.ops = &da_combine_v5_s4_dai_ops,
+	},
 };
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,0))
 static const struct snd_soc_component_driver da_combine_v5_codec_driver = {
 	.read = da_combine_v5_reg_read,
 	.write = da_combine_v5_reg_write,
@@ -296,15 +318,6 @@ static const struct snd_soc_component_driver da_combine_v5_codec_driver = {
 	.probe = da_combine_v5_codec_probe,
 	.remove = da_combine_v5_codec_remove,
 };
-#else
-static struct snd_soc_codec_driver da_combine_v5_codec_driver = {
-	.read = da_combine_v5_reg_read_by_codec,
-	.write = da_combine_v5_reg_write_by_codec,
-	.component_driver.name = HISI_HI6405_CODEC_NAME,
-	.component_driver.probe = da_combine_v5_codec_probe,
-	.component_driver.remove = da_combine_v5_codec_remove,
-};
-#endif
 
 static bool check_card_valid(struct da_combine_v5_platform_data *platform_data)
 {
@@ -616,28 +629,12 @@ static void get_board_cfg(struct device_node *node,
 	AUDIO_LOGI("ap reset disable %d", board_cfg->ap_reset_disable);
 }
 
-static int long_press_powerkey_to_mute(struct notifier_block *nb, unsigned long event, void *buf)
-{
-	struct snd_soc_component *codec = da_combine_v5_get_codec();
-
-	if (event == HISI_PRESS_KEY_6S && codec != NULL)
-		play_config_power_event(SAMPLE_RATE_INDEX_48K, codec, SND_SOC_DAPM_POST_PMD);
-
-	return 0;
-}
-
 static void register_powerkey_handler(struct da_combine_v5_platform_data *platform_data)
 {
-	if (of_property_read_bool(platform_data->node, "hisilicon,powerkey_long_press_to_mute")) {
-		platform_data->powerkey_block.notifier_call = long_press_powerkey_to_mute;
-		hisi_powerkey_register_notifier(&platform_data->powerkey_block);
-	}
 }
 
 static void unregister_powerkey_handler(struct da_combine_v5_platform_data *platform_data)
 {
-	if (of_property_read_bool(platform_data->node, "hisilicon,powerkey_long_press_to_mute"))
-		hisi_powerkey_unregister_notifier(&platform_data->powerkey_block);
 }
 
 static int init_platform_data(struct platform_device *pdev,
@@ -688,7 +685,6 @@ static int init_platform_data(struct platform_device *pdev,
 	mutex_init(&platform_data->impdet_dapm_mutex);
 
 	platform_set_drvdata(pdev, platform_data);
-	dev_set_name(&pdev->dev, DAI_LINK_CODEC_NAME);
 
 	platform_data->is_madswitch_on = false;
 	platform_data->is_callswitch_on = false;
@@ -738,26 +734,29 @@ static void dsp_power_down(struct snd_soc_component *codec)
 		0x1 << DSP_TOP_ISO_CTRL_OFFSET | 0x1 << DSP_TOP_MTCMOS_CTRL_OFFSET);
 }
 
-#ifdef CONFIG_HUAWEI_DSM
-static void irq_handler(char *irq_name, unsigned int reg,
-	unsigned int reg_offset, int dsm_type, void *data)
-{
-	struct da_combine_v5_platform_data *platform_data = (struct da_combine_v5_platform_data *)(data);
-	struct snd_soc_component *codec = platform_data->codec;
+/* DSM (Huawei device status monitor) event ids, informational only */
+enum {
+	DSM_CODEC_BUNK1_OCP,
+	DSM_CODEC_BUNK1_SCP,
+	DSM_CODEC_LDO_AVDD18_OCP,
+	DSM_CODEC_LDOP_OCP,
+	DSM_CODEC_LDON_OCP,
+	DSM_CODEC_CP1_SHORT,
+	DSM_CODEC_CP2_SHORT,
+	DSM_HI6402_PLL_UNLOCK,
+};
 
-	if (codec != NULL) {
-		AUDIO_LOGW("%s irq receive", irq_name);
-		snd_soc_component_write(codec, reg, 0x1 << reg_offset);
-		dsm_report(dsm_type, irq_name);
-	}
-}
-#else
 static void irq_handler(const char *irq_name, unsigned int reg,
 	unsigned int reg_offset, int dsm_type, void *data)
 {
+	struct da_combine_v5_platform_data *platform_data = data;
+	struct snd_soc_component *codec = platform_data->codec;
 
+	if (codec != NULL) {
+		dev_warn_ratelimited(codec->dev, "%s irq received\n", irq_name);
+		snd_soc_component_write(codec, reg, 0x1 << reg_offset);
+	}
 }
-#endif
 
 static irqreturn_t bunk1_ocp_handler(int irq, void *data)
 {
@@ -952,7 +951,6 @@ static void reset_codec_dsp(struct snd_soc_component *codec, enum hi64xx_pll_typ
 	msleep(100);
 	dsp_power_down(codec);
 	dump_pll_data(codec);
-	hi64xx_wtdog_send_event();
 }
 
 static irqreturn_t pll_unlock_handler(int irq, void *data)
@@ -1060,7 +1058,6 @@ static int codec_request_irq(struct da_combine_v5_platform_data *platform_data)
 static int da_combine_v5_platform_probe(struct platform_device *pdev)
 {
 	int ret;
-	unsigned int temp;
 	struct device *dev = &pdev->dev;
 	struct da_combine_v5_platform_data *platform_data = devm_kzalloc(dev, sizeof(*platform_data), GFP_KERNEL);
 
@@ -1087,38 +1084,9 @@ static int da_combine_v5_platform_probe(struct platform_device *pdev)
 		goto irq_request_err_exit;
 	}
 
-	ret = hi64xx_compat_init(platform_data->cdc_ctrl, platform_data->irqmgr);
-	if (ret != 0) {
-		AUDIO_LOGE("compat init failed:0x%x", ret);
-		goto compat_init_err_exit;
-	}
 
-	if (!of_property_read_u32(dev->of_node, "hisilicon,codec_type", &temp)) {
-		if (temp == CODEC_TYPE_PC) {
-			AUDIO_LOGI("pc type, audio and bt dai");
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,0))
-			ret = devm_snd_soc_register_component(dev, &da_combine_v5_codec_driver, da_combine_v5_dai_pc, ARRAY_SIZE(da_combine_v5_dai_pc));
-#else
-			ret = snd_soc_register_codec(dev, &da_combine_v5_codec_driver, da_combine_v5_dai_pc, ARRAY_SIZE(da_combine_v5_dai_pc));
-#endif
-		} else {
-			AUDIO_LOGI("unknown type, use default dai type");
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,0))
-			ret = devm_snd_soc_register_component(dev, &da_combine_v5_codec_driver, da_combine_v5_dai, ARRAY_SIZE(da_combine_v5_dai));
-#else
-			ret = snd_soc_register_codec(dev, &da_combine_v5_codec_driver, da_combine_v5_dai, ARRAY_SIZE(da_combine_v5_dai));
-#endif
-		}
-	}
-	else {
-		AUDIO_LOGI("default type");
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,0))
-		ret = devm_snd_soc_register_component(dev, &da_combine_v5_codec_driver, da_combine_v5_dai, ARRAY_SIZE(da_combine_v5_dai));
-#else
-		ret = snd_soc_register_codec(dev, &da_combine_v5_codec_driver, da_combine_v5_dai, ARRAY_SIZE(da_combine_v5_dai));
-#endif
-	}
-
+	ret = devm_snd_soc_register_component(dev, &da_combine_v5_codec_driver,
+		da_combine_v5_dai_pc, ARRAY_SIZE(da_combine_v5_dai_pc));
 	if (ret != 0) {
 		AUDIO_LOGE("registe driver failed:0x%x", ret);
 		goto codec_register_err_exit;
@@ -1127,8 +1095,6 @@ static int da_combine_v5_platform_probe(struct platform_device *pdev)
 	return ret;
 
 codec_register_err_exit:
-	hi64xx_compat_deinit();
-compat_init_err_exit:
 	codec_free_irq(platform_data);
 irq_request_err_exit:
 	hi64xx_irq_deinit_irq(platform_data->irqmgr);
@@ -1143,28 +1109,13 @@ free_platform_data:
 	return ret;
 }
 
-static int da_combine_v5_platform_remove(struct platform_device *pdev)
+static void da_combine_v5_platform_remove(struct platform_device *pdev)
 {
 	struct da_combine_v5_platform_data *platform_data = platform_get_drvdata(pdev);
 
-#ifdef CONFIG_HAC_SUPPORT
-	if (gpio_is_valid(platform_data->board_config.hac_gpio))
-		gpio_free(platform_data->board_config.hac_gpio);
-#endif
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,19,0))
-	snd_soc_unregister_codec(&pdev->dev);
-#endif
-
-	hi64xx_compat_deinit();
-
 	codec_free_irq(platform_data);
-
 	hi64xx_irq_deinit_irq(platform_data->irqmgr);
-
 	deinit_platform_data(platform_data);
-
-	return 0;
 }
 
 static void da_combine_v5_platform_shutdown(struct platform_device *pdev)
@@ -1184,30 +1135,13 @@ const struct dev_pm_ops da_combine_v5_codec_pm_ops = {
 	.restore = da_combine_v5_codec_restore,
 };
 
-static struct platform_driver da_combine_v5_platform_driver = {
+struct platform_driver hi6405_codec_driver = {
 	.probe = da_combine_v5_platform_probe,
 	.remove = da_combine_v5_platform_remove,
 	.shutdown = da_combine_v5_platform_shutdown,
 	.driver = {
-		.owner = THIS_MODULE,
 		.name = DAI_LINK_CODEC_NAME,
-		.of_match_table = of_match_ptr(da_combine_v5_platform_match),
+		.of_match_table = da_combine_v5_platform_match,
 		.pm = &da_combine_v5_codec_pm_ops,
 	},
 };
-
-static int __init da_combine_v5_platform_init(void)
-{
-	return platform_driver_register(&da_combine_v5_platform_driver);
-}
-module_init(da_combine_v5_platform_init);
-
-static void __exit da_combine_v5_platform_exit(void)
-{
-	platform_driver_unregister(&da_combine_v5_platform_driver);
-}
-module_exit(da_combine_v5_platform_exit);
-
-MODULE_DESCRIPTION("ASoC da_combine_v5 codec driver");
-MODULE_LICENSE("GPL");
-

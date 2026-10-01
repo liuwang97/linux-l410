@@ -11,7 +11,7 @@
 #ifndef __DA_COMBINE_V5_PGA_WIDGET_H__
 #define __DA_COMBINE_V5_PGA_WIDGET_H__
 
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
+#include "hi64xx/da_combine_v5_type.h"
 
 int da_combine_v5_add_pga_widgets(struct snd_soc_component *codec, bool single_kcontrol);
 

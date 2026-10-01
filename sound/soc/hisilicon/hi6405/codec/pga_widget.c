@@ -15,12 +15,11 @@
 #include <sound/tlv.h>
 
 #include "asoc_adapter.h"
-#include "linux/hisi/audio_log.h"
-#include "linux/hisi/hi64xx/hi64xx_utils.h"
-#include "linux/hisi/hi64xx/da_combine_v5.h"
-#include "linux/hisi/hi64xx/da_combine_v5_regs.h"
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
-#include "huawei_platform/power/vsys_switch/vsys_switch.h"
+#include "hi6405_compat.h"
+#include "hi64xx/hi64xx_utils.h"
+#include "hi64xx/da_combine_v5.h"
+#include "hi64xx/da_combine_v5_regs.h"
+#include "hi64xx/da_combine_v5_type.h"
 
 #include "switch_widget.h"
 

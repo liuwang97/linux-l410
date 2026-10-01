@@ -20,15 +20,24 @@
 #ifndef _SLIMBUS_UTILS_H_
 #define _SLIMBUS_UTILS_H_
 
-#include "soc_acpu_baseaddr_interface.h"
 #include "slimbus_types.h"
 
-#ifndef SOC_ACPU_AO_IOC_BASE_ADDR
-#define IOC_BASE_ADDR SOC_ACPU_PAD_AO_IOMG_IOCG_BASE_ADDR
-#else
-#define IOC_BASE_ADDR SOC_ACPU_AO_IOC_BASE_ADDR
-#endif
+/* Kirin 990 AO IOC (SOC_ACPU_AO_IOC_BASE_ADDR) */
+#define IOC_BASE_ADDR 0xFA89C000
 #define IOC_REG_SIZE 0x1000
+
+/* ASP_CFG registers (asp_cfg.h) */
+#define ASP_CFG_R_RST_CTRLEN_REG		0x0
+#define ASP_CFG_R_RST_CTRLDIS_REG		0x4
+#define ASP_CFG_R_GATE_EN_REG			0xC
+#define ASP_CFG_R_GATE_DIS_REG			0x10
+#define ASP_CFG_R_GATE_CLKDIV_EN_REG		0x1C
+#define ASP_CFG_R_CLK1_DIV_REG			0x20
+#define ASP_CFG_R_CLK_SEL_REG			0x38
+#define ASP_CFG_R_CG_EN_REG			0x5C
+#define ASP_CFG_R_INTR_NS_EN_REG		0x68
+#define ASP_CFG_R_SLIMBUS_ID			0x01b8
+#define ASP_CFG_SLIMBUS_INTR_MASK_OFFSET	3
 
 #define IOC_SYS_IOMG_011 0x02c
 #define IOC_SYS_IOMG_012 0x030

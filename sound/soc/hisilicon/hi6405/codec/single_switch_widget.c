@@ -15,12 +15,11 @@
 #include <linux/gpio.h>
 #include <linux/of_gpio.h>
 
-#include "linux/hisi/audio_log.h"
-#include "linux/hisi/hi64xx/da_combine_v5.h"
-#include "linux/hisi/hi64xx/da_combine_v5_regs.h"
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
-#include "linux/hisi/hi64xx/hi64xx_utils.h"
-#include <linux/hisi/hi64xx/hi64xx_mbhc_rear_jack.h>
+#include "hi6405_compat.h"
+#include "hi64xx/da_combine_v5.h"
+#include "hi64xx/da_combine_v5_regs.h"
+#include "hi64xx/da_combine_v5_type.h"
+#include "hi64xx/hi64xx_utils.h"
 
 #include "slimbus.h"
 #include "slimbus_6405.h"

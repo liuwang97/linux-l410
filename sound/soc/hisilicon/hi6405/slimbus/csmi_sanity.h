@@ -19,9 +19,9 @@
 #ifndef _CSMI_SANITY_H_
 #define _CSMI_SANITY_H_
 
-#include <csmi.h>
-#include <cdn_stdtypes.h>
-#include <cdn_errno.h>
+#include "csmi.h"
+#include "cdn_stdtypes.h"
+#include "cdn_errno.h"
 
 /**
  * Checks validity of parameters for function probe

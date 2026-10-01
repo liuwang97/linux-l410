@@ -9,16 +9,15 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <cdn_stdtypes.h>
-#include <cdn_errno.h>
+#include "cdn_stdtypes.h"
+#include "cdn_errno.h"
 
 #include "cdn_stdint.h"
 #include "cdn_errno.h"
-#include <csmi.h>
+#include "csmi.h"
 #include "csmi_sanity.h"
 #include "csmi_regs.h"
 #include "cps.h"
-#include "slimbus_debug.h"
 #include "slimbus_drv.h"
 
 /*lint -e750 -e578 -e866 -e774 -e730 -e514 -e64 -e527 -e613*/

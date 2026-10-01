@@ -13,10 +13,9 @@
 
 #include <sound/soc.h>
 #include <linux/workqueue.h>
-#include <linux/hisi/hisi_powerkey_event.h>
-#include "linux/hisi/hi64xx/hi64xx_resmgr.h"
-#include "linux/hisi/hi64xx/hi64xx_mbhc.h"
-#include "../../../drivers/hisi/slimbus/slimbus.h"
+#include "hi64xx/hi64xx_resmgr.h"
+#include "hi64xx/hi64xx_mbhc.h"
+#include "slimbus.h"
 
 #define HSMIC_MUX_OFFSET             4
 #define AUXMIC_MUX_OFFSET            4

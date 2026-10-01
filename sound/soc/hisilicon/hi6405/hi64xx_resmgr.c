@@ -16,7 +16,7 @@
  *
  */
 
-#include <linux/hisi/hi64xx/hi64xx_resmgr.h>
+#include "hi64xx/hi64xx_resmgr.h"
 
 #include <linux/module.h>
 #include <linux/err.h>
@@ -28,9 +28,8 @@
 #include <linux/notifier.h>
 #include <linux/device.h>
 #include <linux/pm_wakeup.h>
-#include <linux/hisi/audio_log.h>
+#include "hi6405_compat.h"
 #ifdef CONFIG_HUAWEI_DSM
-#include <dsm_audio/dsm_audio.h>
 #endif
 
 #define LOG_TAG "DA_combine_resmgr"
@@ -65,7 +64,7 @@ struct hi64xx_resmgr_priv {
 	wait_queue_head_t pll_rel_wq;
 	enum pll_rel_state pll_wait_rel[PLL_MAX];
 	struct task_struct *pll_rel_thrd;
-	struct wakeup_source wake_lock;
+	struct wakeup_source *wake_lock;
 
 	struct blocking_notifier_head notifier;
 
@@ -516,14 +515,14 @@ static int pll_delayed_release_thread(void *data)
 		}
 		spin_unlock(&priv->pll_rel_wq.lock);
 
-		__pm_stay_awake(&priv->wake_lock);
+		__pm_stay_awake(priv->wake_lock);
 		while (pending && !kthread_should_stop()) {
 			msleep(200);
 			pending = false;
 
 			release_pll_by_state(priv, &pending);
 		}
-		__pm_relax(&priv->wake_lock);
+		__pm_relax(priv->wake_lock);
 	}
 
 	return 0;
@@ -557,7 +556,7 @@ int hi64xx_resmgr_init(struct snd_soc_component *codec, struct hi_cdc_ctrl *cdc_
 	mutex_init(&priv->ibias_mutex);
 	mutex_init(&priv->supply_mutex);
 
-	wakeup_source_init(&priv->wake_lock, "hi64xx-resmgr");
+	priv->wake_lock = wakeup_source_register(NULL, "hi64xx-resmgr");
 
 	BLOCKING_INIT_NOTIFIER_HEAD(&priv->notifier);
 
@@ -580,7 +579,7 @@ error_exit:
 	mutex_destroy(&priv->micbias_mutex);
 	mutex_destroy(&priv->ibias_mutex);
 	mutex_destroy(&priv->supply_mutex);
-	wakeup_source_trash(&priv->wake_lock);
+	wakeup_source_unregister(priv->wake_lock);
 
 	kfree(priv);
 	priv = NULL;
@@ -602,7 +601,7 @@ void hi64xx_resmgr_deinit(struct hi64xx_resmgr *resmgr)
 	mutex_destroy(&priv->micbias_mutex);
 	mutex_destroy(&priv->ibias_mutex);
 	mutex_destroy(&priv->supply_mutex);
-	wakeup_source_trash(&priv->wake_lock);
+	wakeup_source_unregister(priv->wake_lock);
 
 	kfree(priv);
 	priv = NULL;

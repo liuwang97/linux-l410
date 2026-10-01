@@ -7,4 +7,6 @@ config SND_I2S_HI6210_I2S
 	help
 	  Hisilicon I2S
 
+source "sound/soc/hisilicon/hi6405/Kconfig"
+
 endmenu

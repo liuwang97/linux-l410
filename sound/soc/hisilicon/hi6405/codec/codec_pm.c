@@ -18,16 +18,14 @@
 
 #include "codec_pm.h"
 
-#include <linux/hisi/audio_log.h>
+#include "hi6405_compat.h"
 
-#include <linux/hisi/hi64xx/da_combine_v5.h>
-#include <linux/hisi/hi64xx/da_combine_v5_regs.h>
-#include <linux/hisi/hi64xx/hi64xx_mbhc_rear_jack.h>
-#include <linux/hisi/hi64xx/hi_cdc_ctrl.h>
+#include "hi64xx/da_combine_v5.h"
+#include "hi64xx/da_combine_v5_regs.h"
+#include "hi64xx/hi_cdc_ctrl.h"
 
 #include "codec_probe.h"
 #include "resource_widget.h"
-#include "download/download_image.h"
 
 #define CODEC_PM_SWITCHES_MAX_COUNT 10
 
@@ -135,7 +133,6 @@ static void codec_resume(struct snd_soc_component *codec)
 	set_switch_value(codec, set_kctl_value);
 
 	hi64xx_plug_in_detect_wrapper(priv->mbhc);
-	hi64xx_rear_jack_plug_in_detect_wrapper();
 
 	AUDIO_LOGI("end");
 }
@@ -274,9 +271,7 @@ int da_combine_v5_codec_restore(struct device *dev)
 	get_headset_plug_in_status();
 	restore_pll_resource(codec);
 	codec_resume(codec);
-	if (enable_codec_gpio_irq(priv) == 0)
-		if (!of_property_read_bool(priv->node, "hisilicon,dsp_fw_load_disable"))
-			hi64xx_fw_restore();
+	enable_codec_gpio_irq(priv);
 
 	AUDIO_LOGI("end");
 	return 0;
@@ -338,7 +333,7 @@ static void get_codec_pm_switch(struct snd_soc_component *codec)
 			return;
 		}
 
-		ret = strlcpy(switches[i].id.name, name, len);
+		ret = strscpy(switches[i].id.name, name, len);
 		if (ret >= len)
 			AUDIO_LOGW("switch '%s' is too long was truncated", name);
 

@@ -15,28 +15,23 @@
 #include <sound/soc.h>
 
 #ifdef CONFIG_HUAWEI_DSM
-#include <dsm_audio/dsm_audio.h>
 #endif
-#include "linux/hisi/audio_log.h"
+#include "hi6405_compat.h"
 #include "slimbus.h"
 #include "slimbus_6405.h"
 #ifdef CONFIG_SND_SOC_HICODEC_DEBUG
-#include "debug.h"
 #endif
 #include "asoc_adapter.h"
-#include "linux/hisi/hi64xx/hi64xx_utils.h"
-#include "linux/hisi/hi64xx/hi64xx_resmgr.h"
-#include "linux/hisi/hi64xx/hi64xx_vad.h"
-#include "linux/hisi/hi64xx/hi64xx_mbhc.h"
-#include "linux/hisi/hi64xx/da_combine_v5_regs.h"
-#include "linux/hisi/hi64xx/da_combine_v5_type.h"
-#include "linux/hisi/hi64xx/da_combine_v5.h"
-#include "da_combine_v5_dsp_config.h"
+#include "hi64xx/hi64xx_utils.h"
+#include "hi64xx/hi64xx_resmgr.h"
+#include "hi64xx/hi64xx_mbhc.h"
+#include "hi64xx/da_combine_v5_regs.h"
+#include "hi64xx/da_combine_v5_type.h"
+#include "hi64xx/da_combine_v5.h"
 #include "kcontrol.h"
 #include "resource_widget.h"
 #include "path_widget.h"
 #include "switch_widget.h"
-#include "route.h"
 #include "utils.h"
 #include "single_drv_widget.h"
 #include "single_pga_widget.h"
@@ -44,11 +39,9 @@
 #include "pga_widget.h"
 #include "single_switch_route.h"
 #include "codec_pm.h"
-#include "rdr_hisi_audio_codec.h"
+#include "codec_debugfs.h"
 
 #ifdef CONFIG_HIGH_RESISTANCE_HS_DET
-#include "high_res_cfg.h"
-#include "huawei_platform/audio/high_resistance_hs_det.h"
 #endif
 
 #define ULTRA_ALL_CHECK_TIME       5
@@ -1104,11 +1097,6 @@ static int codec_init(struct snd_soc_component *codec,
 		goto mbhc_init_failed;
 	}
 
-	ret = da_combine_v5_dsp_config_init(codec, data);
-	if (ret != 0) {
-		AUDIO_LOGE("dsp init failed: 0x%x", ret);
-		goto dsp_init_failed;
-	}
 
 	ret = utils_init(data);
 	if (ret != 0) {
@@ -1116,11 +1104,6 @@ static int codec_init(struct snd_soc_component *codec,
 		goto utils_init_failed;
 	}
 
-	ret = hi64xx_vad_init(codec, data->irqmgr);
-	if (ret != 0) {
-		AUDIO_LOGE("vad init failed: 0x%x", ret);
-		goto vad_init_failed;
-	}
 
 	ret = slimbus_enumerate(data);
 	if (ret != 0) {
@@ -1140,57 +1123,10 @@ static int codec_init(struct snd_soc_component *codec,
 	return ret;
 
 slimbus_enumerate_failed:
-	hi64xx_vad_deinit(data->node);
-vad_init_failed:
 	hi64xx_utils_deinit();
 utils_init_failed:
-	da_combine_v5_dsp_config_deinit();
-dsp_init_failed:
 	hi64xx_mbhc_deinit(data->mbhc);
 mbhc_init_failed:
-	return ret;
-}
-
-static int codec_add_driver_resource(struct snd_soc_component *codec)
-{
-	int ret = da_combine_v5_add_kcontrol(codec);
-
-	if (ret != 0) {
-		AUDIO_LOGE("add kcontrols failed, ret = %d", ret);
-		goto exit;
-	}
-
-	ret = da_combine_v5_add_resource_widgets(codec, false);
-	if (ret != 0) {
-		AUDIO_LOGE("add resource widgets failed, ret = %d", ret);
-		goto exit;
-	}
-
-	ret = da_combine_v5_add_pga_widgets(codec, false);
-	if (ret != 0) {
-		AUDIO_LOGE("add pga widgets failed, ret = %d", ret);
-		goto exit;
-	}
-
-	ret = da_combine_v5_add_path_widgets(codec, false);
-	if (ret != 0) {
-		AUDIO_LOGE("add path widgets failed, ret = %d", ret);
-		goto exit;
-	}
-
-	ret = da_combine_v5_add_switch_widgets(codec, false);
-	if (ret != 0) {
-		AUDIO_LOGE("add switch widgets failed, ret = %d", ret);
-		goto exit;
-	}
-
-	ret = da_combine_v5_add_routes(codec);
-	if (ret != 0) {
-		AUDIO_LOGE("add route map failed, ret = %d", ret);
-		goto exit;
-	}
-
-exit:
 	return ret;
 }
 
@@ -1258,9 +1194,7 @@ exit:
 static void codec_deinit(struct da_combine_v5_platform_data *data)
 {
 	pll_track_deinit(data);
-	hi64xx_vad_deinit(data->node);
 	hi64xx_utils_deinit();
-	da_combine_v5_dsp_config_deinit();
 	hi64xx_mbhc_deinit(data->mbhc);
 }
 
@@ -1401,31 +1335,14 @@ static void hi64xx_print_codec_info(struct snd_info_entry *entry,
 
 static void hi64xx_codec_info_select(struct snd_soc_component *component)
 {
-	struct snd_info_entry *entry = NULL;
 	int ret;
 
-	ret = snd_card_proc_new(component->card->snd_card, "codec#0", &entry);
-	if (ret < 0) {
+	ret = snd_card_ro_proc_new(component->card->snd_card, "codec#0", NULL,
+		hi64xx_print_codec_info);
+	if (ret < 0)
 		AUDIO_LOGE("select info failed");
-		return;
-	}
-	snd_info_set_text_ops(entry, NULL, hi64xx_print_codec_info);
 
 	return;
-}
-
-static bool get_ap_reset_cfg(void)
-{
-	struct da_combine_v5_platform_data *platform_data = NULL;
-
-	if (da_combine_v5_codec == NULL)
-		return false;
-
-	platform_data = snd_soc_component_get_drvdata(da_combine_v5_codec);
-	if (platform_data->board_config.ap_reset_disable)
-		return true;
-
-	return false;
 }
 
 int da_combine_v5_codec_probe(struct snd_soc_component *codec)
@@ -1477,10 +1394,7 @@ int da_combine_v5_codec_probe(struct snd_soc_component *codec)
 		AUDIO_LOGI("debug init failed: 0x%x", ret);
 #endif
 
-	if (platform_data->board_config.single_kcontrol_route_mode)
-		ret = codec_add_driver_resource_for_single_control(codec);
-	else
-		ret = codec_add_driver_resource(codec);
+	ret = codec_add_driver_resource_for_single_control(codec);
 
 	if (ret != 0) {
 #ifdef CONFIG_SND_SOC_HICODEC_DEBUG
@@ -1498,8 +1412,8 @@ int da_combine_v5_codec_probe(struct snd_soc_component *codec)
 		hi64xx_codec_info_select(codec);
 
 	da_combine_v5_codec_pm_init(da_combine_v5_codec);
+	hi6405_debugfs_init(codec);
 
-	rdr_audio_register_get_ap_reset_cfg_cb(get_ap_reset_cfg);
 
 	AUDIO_LOGI("probe ok");
 
@@ -1508,6 +1422,7 @@ int da_combine_v5_codec_probe(struct snd_soc_component *codec)
 
 void da_combine_v5_codec_remove(struct snd_soc_component *codec)
 {
+	hi6405_debugfs_remove();
 	struct da_combine_v5_platform_data *platform_data = snd_soc_component_get_drvdata(codec);
 
 	if (platform_data == NULL) {

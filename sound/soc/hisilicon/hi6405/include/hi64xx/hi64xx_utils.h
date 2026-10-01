@@ -20,7 +20,7 @@
 #define __HI64XX_UTILS_H__
 
 #include <sound/soc.h>
-#include <linux/hisi/hi64xx/hi_cdc_ctrl.h>
+#include "hi64xx/hi_cdc_ctrl.h"
 
 struct utils_config {
 	/* functions to dump codec registers */

@@ -16,7 +16,7 @@
  *
  */
 
-#include <linux/hisi/hi64xx/hi64xx_irq.h>
+#include "hi64xx/hi64xx_irq.h"
 
 #include <linux/module.h>
 #include <linux/delay.h>
@@ -26,12 +26,12 @@
 #include <linux/pm_runtime.h>
 #include <linux/of_device.h>
 #include <linux/of_irq.h>
+#include <linux/of_platform.h>
 #include <linux/pm_wakeup.h>
 #include <linux/mutex.h>
 #include <linux/clk.h>
-#include <linux/version.h>
-#include <linux/hisi/hi64xx_dsp/hi64xx_dsp_misc.h>
-#include <linux/hisi/audio_log.h>
+#include "hi6405_compat.h"
+#include "hi6405_drv.h"
 
 #ifndef NO_IRQ
 #define NO_IRQ 0
@@ -56,7 +56,7 @@ struct irq_platform_data {
 	/* mutex for sr */
 	struct mutex sr_lock;
 	/* wake lock for irq thread handler */
-	struct wakeup_source wake_lock;
+	struct wakeup_source *wake_lock;
 	/* used to mask sub irqs */
 	unsigned char irq_mask[HI64XX_MAX_IRQ_REGS_NUM];
 	/* used to clear sub irqs */
@@ -71,11 +71,6 @@ static const struct of_device_id g_irq_match_tbl[] = {
 };
 MODULE_DEVICE_TABLE(of, g_irq_match_tbl);
 
-static const struct of_device_id g_irq_child_match_tbl[] = {
-	{ .compatible = "hisilicon,hi6402-codec", },
-	{},
-};
-
 static irqreturn_t irq_handler(int irq, void *data)
 {
 	struct irq_platform_data *priv = data;
@@ -85,7 +80,7 @@ static irqreturn_t irq_handler(int irq, void *data)
 		return IRQ_NONE;
 	}
 
-	__pm_stay_awake(&priv->wake_lock);
+	__pm_stay_awake(priv->wake_lock);
 	disable_irq_nosync(irq);
 
 	return IRQ_WAKE_THREAD;
@@ -133,7 +128,7 @@ static irqreturn_t irq_handler_thread(int irq, void *data)
 
 	mutex_unlock(&priv->sr_lock);
 	enable_irq(irq);
-	__pm_relax(&priv->wake_lock);
+	__pm_relax(priv->wake_lock);
 
 	return IRQ_HANDLED;
 }
@@ -252,9 +247,6 @@ static int hi64xx_irq_map(struct irq_domain *domain, unsigned int virq,
 	irq_set_chip_data(virq, irq);
 	irq_set_chip(virq, &g_irq_chip);
 	irq_set_nested_thread(virq, true);
-#if KERNEL_VERSION(4, 4, 0) > LINUX_VERSION_CODE
-	set_irq_flags(virq, IRQF_VALID);
-#endif
 
 	return 0;
 }
@@ -270,7 +262,7 @@ static int irq_domain_init(struct device *dev, struct irq_platform_data *data)
 	int i;
 
 	/* create irq domain */
-	data->domain = irq_domain_add_linear(dev->of_node,
+	data->domain = irq_domain_create_linear(of_fwnode_handle(dev->of_node),
 		data->phy_irq_map.irq_num, &g_domain_ops, data);
 	if (data->domain == NULL) {
 		AUDIO_LOGE("create irq domain error");
@@ -545,7 +537,7 @@ static int hi64xx_irq_probe(struct platform_device *pdev)
 	mutex_init(&data->irq_lock);
 	mutex_init(&data->sr_lock);
 	mutex_init(&data->handler_mutex);
-	wakeup_source_init(&data->wake_lock, "hi64xx-irq");
+	data->wake_lock = wakeup_source_register(dev, "hi64xx-irq");
 
 	data->hi64xx_irq.dev = dev;
 
@@ -555,112 +547,29 @@ static int hi64xx_irq_probe(struct platform_device *pdev)
 	data->hi_cdc = cdc_data;
 
 	/* populate sub nodes */
-	of_platform_populate(np, g_irq_child_match_tbl, NULL, dev);
+	of_platform_populate(np, NULL, NULL, dev);
 
 	AUDIO_LOGI("ok");
 
 	return 0;
 }
 
-static int hi64xx_irq_remove(struct platform_device *pdev)
+static void hi64xx_irq_remove(struct platform_device *pdev)
 {
 	struct irq_platform_data *data = platform_get_drvdata(pdev);
 
-	if (data == NULL) {
-		AUDIO_LOGE("data is null");
-		return -EINVAL;
-	}
-
-	free_irq(data->irq_id, data);
-
-	wakeup_source_trash(&data->wake_lock);
+	of_platform_depopulate(&pdev->dev);
+	wakeup_source_unregister(data->wake_lock);
 	mutex_destroy(&data->handler_mutex);
 	mutex_destroy(&data->sr_lock);
 	mutex_destroy(&data->irq_lock);
-
-	platform_set_drvdata(pdev, NULL);
-
-	return 0;
 }
 
-static int hi64xx_irq_suspend(struct platform_device *pdev, pm_message_t state)
-{
-	struct irq_platform_data *data = platform_get_drvdata(pdev);
-	int ret;
-	unsigned long cur_time;
-	unsigned long timeout;
-
-	AUDIO_LOGI("enter");
-
-	if (data == NULL) {
-		AUDIO_LOGE("data is null");
-		return -EINVAL;
-	}
-
-	timeout = jiffies + msecs_to_jiffies(TRY_LOCK_TIMEOUT_MS);
-	while (mutex_trylock(&data->sr_lock) == 0) {
-		cur_time = jiffies;
-		if (time_after(cur_time, timeout)) {
-			AUDIO_LOGE("mutex trylock timeout fail");
-			return -EAGAIN;
-		}
-
-		usleep_range(1000, 2000);
-	}
-
-	ret = hi64xx_dsp_misc_suspend();
-	if (ret != 0)
-		mutex_unlock(&data->sr_lock);
-
-	return ret;
-}
-
-static int hi64xx_irq_resume(struct platform_device *pdev)
-{
-	struct irq_platform_data *data = platform_get_drvdata(pdev);
-	int ret;
-
-	AUDIO_LOGI("enter");
-
-	if (data == NULL) {
-		AUDIO_LOGE("data is null");
-		return -EINVAL;
-	}
-
-	ret = hi64xx_dsp_misc_resume();
-	if (ret != 0)
-		AUDIO_LOGE("hifi misc resume failed");
-
-	mutex_unlock(&data->sr_lock);
-
-	return ret;
-}
-
-static struct platform_driver g_irq_driver = {
+struct platform_driver hi64xx_irq_driver = {
 	.driver = {
 		.name = "hi64xx_irq",
-		.owner = THIS_MODULE,
 		.of_match_table = g_irq_match_tbl,
 	},
 	.probe = hi64xx_irq_probe,
 	.remove = hi64xx_irq_remove,
-	.suspend = hi64xx_irq_suspend,
-	.resume = hi64xx_irq_resume,
 };
-
-static int __init hi64xx_irq_init(void)
-{
-	return platform_driver_register(&g_irq_driver);
-}
-
-static void __exit hi64xx_irq_exit(void)
-{
-	platform_driver_unregister(&g_irq_driver);
-}
-
-fs_initcall_sync(hi64xx_irq_init);
-module_exit(hi64xx_irq_exit);
-
-MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("hi64xx irq controller driver");
-

@@ -28,12 +28,10 @@
 #include <linux/workqueue.h>
 #include <linux/device.h>
 #include <linux/pm_wakeup.h>
-#include <linux/version.h>
-#include "linux/hisi/audio_log.h"
-#include <rdr_hisi_audio_adapter.h>
+#include <linux/ktime.h>
+#include "hi6405_compat.h"
 
 #ifdef CONFIG_HUAWEI_DSM
-#include <dsm_audio/dsm_audio.h>
 #endif
 #include "slimbus.h"
 
@@ -50,8 +48,6 @@
 /* 2us */
 #define REG_ACCESS_TIME_DIFF 2
 
-#define GIC_BASE_ADDR 0xE82B0000
-#define GIC_SIZE 0x7fff
 
 /* used for element RD/WR protection*/
 static struct mutex slimbus_mutex;
@@ -122,11 +118,11 @@ static uintptr_t sctrl_base_addr;
 static enum platform_type plat_type = PLATFORM_PHONE;
 static struct workqueue_struct *slimbus_lost_sync_wq;
 static struct delayed_work slimbus_lost_sync_delay_work;
-static struct wakeup_source slimbus_wake_lock;
+static struct wakeup_source *slimbus_wake_lock;
 
 static void slimbus_dump_state(enum slimbus_dump_state type);
 
-volatile uint32_t slimbus_drv_lostms_get(void)
+uint32_t slimbus_drv_lostms_get(void)
 {
 	return lostms_times;
 }
@@ -136,7 +132,7 @@ void slimbus_drv_lostms_set(uint32_t count)
 	lostms_times = count;
 }
 
-volatile bool slimbus_int_need_clear_get(void)
+bool slimbus_int_need_clear_get(void)
 {
 	return int_need_clear;
 }
@@ -148,13 +144,7 @@ void slimbus_int_need_clear_set(volatile bool flag)
 
 int64_t get_timeus(void)
 {
-	struct timeval time;
-	int64_t timeus;
-
-	do_gettimeofday(&time);
-	timeus = 1000000 * time.tv_sec + time.tv_usec;
-
-	return timeus;
+	return ktime_to_us(ktime_get());
 }
 
 /*
@@ -545,7 +535,7 @@ static void manager_interrupts_handler(void *pd, CSMI_Interrupt interrupt)
 	if ((interrupt & CSMI_INT_SYNC_LOST) && (slimbus_devices.devices > SOC_DEVICE_NUM)) {
 		slimbus_dev_limit_err("LOST SYNC, interrupt:%#x \n", interrupt);
 		slimbus_dump_state(SLIMBUS_DUMP_LOSTMS);
-		__pm_wakeup_event(&slimbus_wake_lock, 1000);
+		__pm_wakeup_event(slimbus_wake_lock, 1000);
 		queue_delayed_work(slimbus_lost_sync_wq, &slimbus_lost_sync_delay_work, msecs_to_jiffies(50));
 	}
 }
@@ -795,7 +785,7 @@ static void resource_init(enum platform_type platform_type,
 	spin_lock_init(&slimbus_spinlock);
 	init_completion(&(internal_reply.read_finish));
 	init_completion(&(internal_reply.request_finish));
-	wakeup_source_init(&slimbus_wake_lock, "slimbus_wake_lock");
+	slimbus_wake_lock = wakeup_source_register(NULL, "slimbus_wake_lock");
 
 	general_cfg.regBase = (uintptr_t)slimbus_reg;
 	asp_base_reg = (uintptr_t)asp_reg;
@@ -888,7 +878,7 @@ request_irq_failed:
 	devm_slimbus_priv = NULL;
 exit:
 	mutex_destroy(&slimbus_mutex);
-	wakeup_source_trash(&slimbus_wake_lock);
+	wakeup_source_unregister(slimbus_wake_lock);
 
 	return ret;
 }
@@ -911,7 +901,7 @@ int slimbus_drv_release(int irq)
 {
 	free_irq(irq, devm_slimbus_priv);
 	mutex_destroy(&slimbus_mutex);
-	wakeup_source_trash(&slimbus_wake_lock);
+	wakeup_source_unregister(slimbus_wake_lock);
 
 	if (slimbus_lost_sync_wq) {
 		cancel_delayed_work(&slimbus_lost_sync_delay_work);
@@ -1031,26 +1021,15 @@ exit:
 
 static void dump_irq(void)
 {
-	uint32_t state[7] = {0};
-	uintptr_t gic_base_addr;
+	uint32_t state[2];
 
+	/*
+	 * The vendor code also peeked at GIC registers at a fixed address of an
+	 * older SoC (0xe82b0000; the Kirin 990 GICv3 is at 0xea000000): dropped.
+	 */
 	state[0] = readl((void __iomem *)(general_cfg.regBase + 0x3c));
 	state[1] = readl((void __iomem *)(general_cfg.regBase + 0x24));
-	gic_base_addr = (uintptr_t)ioremap(GIC_BASE_ADDR, GIC_SIZE);
-	if (!gic_base_addr) {
-		AUDIO_LOGE("ioremap failed");
-		return;
-	}
-
-	state[2] = readl((void __iomem *)(gic_base_addr + 0x1214));
-	state[3] = readl((void __iomem *)(gic_base_addr + 0x1314));
-	state[4] = readl((void __iomem *)(gic_base_addr + 0x1414));
-	state[5] = readl((void __iomem *)(gic_base_addr + 0x2014));
-	state[6] = readl((void __iomem *)(gic_base_addr + 0x2018));
-	iounmap((void __iomem *)gic_base_addr);
-	gic_base_addr = (uintptr_t)NULL;
-	slimbus_drv_limit_err("0x3c:%#x 0X24:%#x; gic:(%#x,%#x,%#x,%#x,%#x)!\n",
-		state[0], state[1], state[2], state[3], state[4], state[5], state[6]);
+	slimbus_drv_limit_err("0x3c:%#x 0X24:%#x\n", state[0], state[1]);
 
 }
 
@@ -1707,7 +1686,6 @@ exit:
 		AUDIO_LOGE("cur_sm %d, cur_cg %d, cg %d, cur_rf %d", cur_sm, cur_cg, cg, cur_rf);
 		slimbus_dump_state(SLIMBUS_DUMP_ALL);
 		slimbus_dump_state(SLIMBUS_DUMP_LOSTMS);
-		rdr_system_error(RDR_AUDIO_SLIMBUS_LOSTSYNC_MODID, 0, 0);
 	}
 	mutex_unlock(&slimbus_mutex);
 
