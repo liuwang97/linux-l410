@@ -518,7 +518,13 @@ swap_cluster_alloc_table(struct swap_info_struct *si,
 		spin_unlock(&si->global_cluster_lock);
 	local_unlock(&percpu_swap_cluster.lock);
 
-	table = swap_table_alloc(__GFP_HIGH | __GFP_NOMEMALLOC | GFP_KERNEL);
+	/*
+	 * A failure is handled below (the cluster goes back to the free list
+	 * and the folio stays in memory). It is expected from kswapd and from
+	 * direct reclaim: PF_MEMALLOC rules out both reclaim and the reserves.
+	 */
+	table = swap_table_alloc(__GFP_HIGH | __GFP_NOMEMALLOC | __GFP_NOWARN |
+				 GFP_KERNEL);
 
 	/*
 	 * Back to atomic context. We might have migrated to a new CPU with a
