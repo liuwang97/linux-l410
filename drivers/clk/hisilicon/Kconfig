@@ -52,6 +52,18 @@ config COMMON_CLK_HI6220
 	help
 	  Build the Hisilicon Hi6220 clock driver based on the common clock framework.
 
+config COMMON_CLK_KIRIN990
+	bool "HiSilicon Kirin 990 clock driver"
+	depends on ARCH_HISI || COMPILE_TEST
+	depends on OF
+	select HWSPINLOCK
+	select REGMAP
+	help
+	  Clock driver for the Kirin 990 SoC as described by the vendor
+	  firmware device tree (one node per clock under /clocks@0).
+	  The LPM3-owned clocks (CPU/GPU/DDR rates, interactive bus clocks)
+	  need the Kirin IPC mailbox (KIRIN_IPC_MBOX).
+
 config RESET_HISI
 	bool "HiSilicon Reset Controller Driver"
 	depends on ARCH_HISI || COMPILE_TEST
