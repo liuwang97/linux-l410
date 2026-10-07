@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_HISI_VDEC
+	tristate "HiSilicon Kirin 990 video decoder"
+	depends on V4L_MEM2MEM_DRIVERS
+	depends on VIDEO_DEV
+	depends on ARCH_HISI || COMPILE_TEST
+	select MEDIA_CONTROLLER
+	select VIDEOBUF2_DMA_SG
+	select V4L2_MEM2MEM_DEV
+	select V4L2_H264
+	select V4L2_VP9
+	select IOMMU_IO_PGTABLE_LPAE
+	select GENERIC_ALLOCATOR
+	help
+	  Stateless (request API) decoder for the VDH block of the HiSilicon
+	  Kirin 990 video codec (VCodec V500).
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called hisi-vdec.
