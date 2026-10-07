@@ -11,6 +11,7 @@
 #define HISI_VDEC_H_
 
 #include <linux/clk.h>
+#include <linux/completion.h>
 #include <linux/genalloc.h>
 #include <linux/io-pgtable.h>
 #include <linux/platform_device.h>
@@ -48,6 +49,9 @@
 #define VDH_YSTRIDE_1D		0x064
 #define VDH_UVOFFSET_1D		0x068
 #define VDH_HEAD_INF_OFFSET	0x06c
+#define VDH_YSTRIDE_2BIT	0x074
+#define VDH_YOFFSET_2BIT	0x078
+#define VDH_UVOFFSET_2BIT	0x07c
 #define VDH_REF_PIC_TYPE	0x094
 #define VDH_FF_APT_EN		0x098
 #define VDH_DEC_CYCLEPERPIC	0x0b0
@@ -87,14 +91,13 @@
 #define STATE_DEC_ERR		BIT(18)
 #define STATE_VERSION(v)	(((v) >> 19) & 0xff)
 
-/* video_standard values (VFMW VID_STD_E) */
+/* BASIC_CFG1 video_standard */
 enum hivdec_std {
 	HIVDEC_STD_H264 = 0,
-	HIVDEC_STD_MPEG4 = 2,
 	HIVDEC_STD_MPEG2 = 3,
-	HIVDEC_STD_VP8 = 13,
+	HIVDEC_STD_VP8 = 12,
+	HIVDEC_STD_HEVC = 13,
 	HIVDEC_STD_VP9 = 14,
-	HIVDEC_STD_HEVC = 17,
 };
 
 /* SCD block (start code detector, only a few shared registers are used) */
@@ -132,7 +135,7 @@ enum hivdec_std {
 #define HIVDEC_SLOT_HEAD	4	/* compressed-frame head info (CFGINFO) */
 #define HIVDEC_SLOT_PIC		5	/* picture message */
 #define HIVDEC_SLOT_SLICE0	6	/* first slice message */
-#define HIVDEC_MAX_SLICES	128
+#define HIVDEC_MAX_SLICES	200
 #define HIVDEC_MSG_SLOTS	(HIVDEC_SLOT_SLICE0 + HIVDEC_MAX_SLICES + 1)
 
 /* bus address as stored by the VDH */
@@ -181,6 +184,11 @@ struct hivdec_coded_fmt_ops {
 	 */
 	int (*done)(struct hivdec_ctx *ctx, enum vb2_buffer_state state);
 	int (*try_ctrl)(struct hivdec_ctx *ctx, struct v4l2_ctrl *ctrl);
+	/*
+	 * decode what was gathered for a held CAPTURE buffer before a drain
+	 * releases it: 0 = VDH started, >0 = nothing to do
+	 */
+	int (*flush)(struct hivdec_ctx *ctx);
 };
 
 struct hivdec_coded_fmt_desc {
@@ -192,6 +200,7 @@ struct hivdec_coded_fmt_desc {
 	const u32 *decoded_fmts;
 	unsigned int num_decoded_fmts;
 	u32 subsystem_flags;
+	u32 height_align;	/* of decoded frames (macroblock pairs / CTBs) */
 };
 
 /* per capture buffer: decoder-private data kept with the decoded frame */
@@ -239,6 +248,9 @@ struct hivdec_dev {
 
 	/* hardware job state */
 	struct hivdec_ctx *run_ctx;
+	bool flush_run;			/* VDH run outside an m2m job (drain) */
+	struct completion flush_done;
+	wait_queue_head_t job_wq;
 	u32 irq_status;
 	u32 vdh_state;
 	u32 dec_cycles;
@@ -254,6 +266,7 @@ struct hivdec_ctx {
 	struct v4l2_ctrl_handler ctrl_hdl;
 	struct hivdec_dev *dev;
 	struct hivdec_aux_buf msg;	/* message pool */
+	bool job_active;
 	void *priv;			/* codec state */
 };
 
@@ -303,5 +316,6 @@ struct media_request;
 void *hivdec_find_control_data(struct hivdec_ctx *ctx, u32 id);
 
 extern const struct hivdec_coded_fmt_ops hivdec_h264_fmt_ops;
+extern const struct hivdec_coded_fmt_ops hivdec_hevc_fmt_ops;
 
 #endif /* HISI_VDEC_H_ */

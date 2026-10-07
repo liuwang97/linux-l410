@@ -62,6 +62,41 @@ static const struct hivdec_ctrl_desc hivdec_h264_ctrls[] = {
 	},
 };
 
+static const struct hivdec_ctrl_desc hivdec_hevc_ctrls[] = {
+	{ .cfg.id = V4L2_CID_STATELESS_HEVC_SPS },
+	{ .cfg.id = V4L2_CID_STATELESS_HEVC_PPS },
+	{
+		.cfg.id = V4L2_CID_STATELESS_HEVC_SLICE_PARAMS,
+		.cfg.flags = V4L2_CTRL_FLAG_DYNAMIC_ARRAY,
+		.cfg.dims = { HIVDEC_MAX_SLICES - 2 },
+	},
+	{ .cfg.id = V4L2_CID_STATELESS_HEVC_SCALING_MATRIX },
+	{ .cfg.id = V4L2_CID_STATELESS_HEVC_DECODE_PARAMS },
+	{
+		.cfg.id = V4L2_CID_STATELESS_HEVC_DECODE_MODE,
+		.cfg.min = V4L2_STATELESS_HEVC_DECODE_MODE_FRAME_BASED,
+		.cfg.max = V4L2_STATELESS_HEVC_DECODE_MODE_FRAME_BASED,
+		.cfg.def = V4L2_STATELESS_HEVC_DECODE_MODE_FRAME_BASED,
+	},
+	{
+		.cfg.id = V4L2_CID_STATELESS_HEVC_START_CODE,
+		.cfg.min = V4L2_STATELESS_HEVC_START_CODE_ANNEX_B,
+		.cfg.max = V4L2_STATELESS_HEVC_START_CODE_ANNEX_B,
+		.cfg.def = V4L2_STATELESS_HEVC_START_CODE_ANNEX_B,
+	},
+	{
+		.cfg.id = V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
+		.cfg.min = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
+		.cfg.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10,
+		.cfg.def = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
+	},
+	{
+		.cfg.id = V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
+		.cfg.min = V4L2_MPEG_VIDEO_HEVC_LEVEL_1,
+		.cfg.max = V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1,
+	},
+};
+
 static const struct hivdec_coded_fmt_desc hivdec_coded_fmts[] = {
 	{
 		.fourcc = V4L2_PIX_FMT_H264_SLICE,
@@ -79,6 +114,24 @@ static const struct hivdec_coded_fmt_desc hivdec_coded_fmts[] = {
 		.decoded_fmts = hivdec_yuv420_fmts,
 		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_fmts),
 		.subsystem_flags = VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF,
+		.height_align = 32,
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_HEVC_SLICE,
+		.frmsize = {
+			.min_width = 64,
+			.max_width = 4096,
+			.step_width = 8,
+			.min_height = 64,
+			.max_height = 2304,
+			.step_height = 8,
+		},
+		.ctrls = hivdec_hevc_ctrls,
+		.num_ctrls = ARRAY_SIZE(hivdec_hevc_ctrls),
+		.ops = &hivdec_hevc_fmt_ops,
+		.decoded_fmts = hivdec_yuv420_fmts,
+		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_fmts),
+		.height_align = 64,
 	},
 };
 
@@ -94,15 +147,14 @@ static const struct hivdec_coded_fmt_desc *hivdec_find_coded_fmt_desc(u32 fourcc
 
 /*
  * Decoded frames: NV12 in one plane. The VDH writes the luma at YSTADDR_1D
- * with stride YSTRIDE_1D and the interleaved chroma UVOFFSET_1D bytes further.
- * Keep the stride 64-byte aligned and the height a multiple of 32 (field and
- * MBAFF pictures are written in 32-line macroblock pairs).
+ * and the interleaved chroma UVOFFSET_1D bytes further, with a 64-byte
+ * aligned pitch; the height is padded to whole macroblock pairs or CTBs.
  */
 static void hivdec_fill_decoded_pixfmt(struct hivdec_ctx *ctx,
 				       struct v4l2_pix_format_mplane *pix_mp)
 {
 	u32 w = ALIGN(pix_mp->width, 16);
-	u32 h = ALIGN(pix_mp->height, 32);
+	u32 h = ALIGN(pix_mp->height, ctx->coded_fmt_desc->height_align);
 	u32 stride = ALIGN(w, 64);
 
 	pix_mp->width = w;
@@ -349,6 +401,52 @@ static int hivdec_g_selection(struct file *file, void *priv,
 	}
 }
 
+static void hivdec_flush_pending(struct hivdec_ctx *ctx)
+{
+	struct hivdec_dev *vdec = ctx->dev;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(vdec->dev);
+	if (ret < 0)
+		return;
+	reinit_completion(&vdec->flush_done);
+	vdec->flush_run = true;
+	ret = ctx->coded_fmt_desc->ops->flush(ctx);
+	if (!ret) {
+		if (!wait_for_completion_timeout(&vdec->flush_done, msecs_to_jiffies(3000)))
+			dev_err(vdec->dev, "drain decode did not complete\n");
+	} else {
+		vdec->flush_run = false;
+	}
+	pm_runtime_put_autosuspend(vdec->dev);
+}
+
+/*
+ * A drain releases a held CAPTURE buffer; slices gathered for it must be
+ * decoded first, since the picture is only decoded once complete.
+ */
+static int hivdec_decoder_cmd(struct file *file, void *priv,
+			      struct v4l2_decoder_cmd *dc)
+{
+	struct hivdec_ctx *ctx = file_to_hivdec_ctx(file);
+	int ret;
+
+	ret = v4l2_m2m_ioctl_stateless_try_decoder_cmd(file, priv, dc);
+	if (ret)
+		return ret;
+	if (ctx->dev->debug)
+		dev_info(ctx->dev->dev, "decoder_cmd %u: job %d src %u\n", dc->cmd,
+			 READ_ONCE(ctx->job_active),
+			 v4l2_m2m_num_src_bufs_ready(ctx->fh.m2m_ctx));
+	if (dc->cmd == V4L2_DEC_CMD_FLUSH && ctx->coded_fmt_desc->ops->flush) {
+		wait_event_timeout(ctx->dev->job_wq, !READ_ONCE(ctx->job_active),
+				   msecs_to_jiffies(3000));
+		if (!v4l2_m2m_num_src_bufs_ready(ctx->fh.m2m_ctx))
+			hivdec_flush_pending(ctx);
+	}
+	return v4l2_m2m_ioctl_stateless_decoder_cmd(file, priv, dc);
+}
+
 static const struct v4l2_ioctl_ops hivdec_ioctl_ops = {
 	.vidioc_querycap = hivdec_querycap,
 	.vidioc_enum_framesizes = hivdec_enum_framesizes,
@@ -376,7 +474,7 @@ static const struct v4l2_ioctl_ops hivdec_ioctl_ops = {
 	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
 	.vidioc_streamoff = v4l2_m2m_ioctl_streamoff,
 
-	.vidioc_decoder_cmd = v4l2_m2m_ioctl_stateless_decoder_cmd,
+	.vidioc_decoder_cmd = hivdec_decoder_cmd,
 	.vidioc_try_decoder_cmd = v4l2_m2m_ioctl_stateless_try_decoder_cmd,
 };
 
@@ -643,6 +741,8 @@ static void hivdec_job_finish_no_pm(struct hivdec_ctx *ctx,
 				    enum vb2_buffer_state state)
 {
 	v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev, ctx->fh.m2m_ctx, state);
+	WRITE_ONCE(ctx->job_active, false);
+	wake_up(&ctx->dev->job_wq);
 }
 
 void hivdec_job_finish(struct hivdec_ctx *ctx, enum vb2_buffer_state state)
@@ -678,6 +778,11 @@ static void hivdec_hw_done(struct hivdec_dev *vdec, bool timeout)
 			 timeout ? "timeout" : "done", vdec->irq_status,
 			 vdec->vdh_state, STATE_DECODED_SLICES(vdec->vdh_state),
 			 vdec->dec_cycles);
+	if (vdec->flush_run) {
+		vdec->flush_run = false;
+		complete(&vdec->flush_done);
+		return;
+	}
 	/* the codec may chain another hardware run into the same job */
 	if (ctx->coded_fmt_desc->ops->done)
 		ret = ctx->coded_fmt_desc->ops->done(ctx, state);
@@ -734,6 +839,7 @@ static void hivdec_device_run(void *priv)
 	struct hivdec_dev *vdec = ctx->dev;
 	int ret;
 
+	WRITE_ONCE(ctx->job_active, true);
 	ret = pm_runtime_resume_and_get(vdec->dev);
 	if (ret < 0) {
 		hivdec_job_finish_no_pm(ctx, VB2_BUF_STATE_ERROR);
@@ -986,6 +1092,8 @@ static int hivdec_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, vdec);
 	vdec->dev = dev;
 	mutex_init(&vdec->vdev_lock);
+	init_completion(&vdec->flush_done);
+	init_waitqueue_head(&vdec->job_wq);
 	INIT_DELAYED_WORK(&vdec->watchdog_work, hivdec_watchdog_func);
 
 	vdec->regs = devm_platform_ioremap_resource(pdev, 0);

@@ -933,6 +933,26 @@ static int hivdec_h264_decode(struct hivdec_ctx *ctx, struct vb2_v4l2_buffer *ds
 	/* the frame this picture belongs to */
 	cur->decoded |= pic.field ? pic.structure : 3;
 
+	if (vdec->debug > 2) {
+		for (i = 0; i < 16; i++)
+			if (dp->dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_VALID)
+				dev_info(vdec->dev, "  dpb[%u] buf %d apc %d fields %u flags %#x poc %d/%d fn %u\n",
+					 i, pic.dpb_idx[i],
+					 pic.dpb_idx[i] >= 0 ? h->meta[pic.dpb_idx[i]].apc : -9,
+					 dp->dpb[i].fields, dp->dpb[i].flags,
+					 dp->dpb[i].top_field_order_cnt,
+					 dp->dpb[i].bottom_field_order_cnt, dp->dpb[i].frame_num);
+		for (k = 0; k < h->nslices; k++) {
+			const struct v4l2_ctrl_h264_slice_params *sp = &h->slices[k].sp;
+
+			for (i = 0; i <= sp->num_ref_idx_l0_active_minus1 && sp->slice_type != 2; i++)
+				dev_info(vdec->dev, "  L0[%u] = dpb %u fields %u\n", i,
+					 sp->ref_pic_list0[i].index, sp->ref_pic_list0[i].fields);
+			for (i = 0; sp->slice_type == 1 && i <= sp->num_ref_idx_l1_active_minus1; i++)
+				dev_info(vdec->dev, "  L1[%u] = dpb %u fields %u\n", i,
+					 sp->ref_pic_list1[i].index, sp->ref_pic_list1[i].fields);
+		}
+	}
 	if (vdec->debug > 1)
 		for (k = 0; k < h->nslices; k++)
 			dev_info(vdec->dev, "  slice %u: first_mb %u type %u qp %d bits %u/%u\n", k,
@@ -971,6 +991,9 @@ static int hivdec_h264_take_slice(struct hivdec_ctx *ctx)
 		h->error = true;
 		return ret;
 	}
+	if (ctx->dev->debug > 1)
+		dev_info(ctx->dev->dev, "  take slice hold=%d\n",
+			 !!(src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF));
 	if (src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF)
 		return 1;
 	ret = hivdec_h264_decode(ctx, dst);
@@ -1035,11 +1058,26 @@ static int hivdec_h264_done(struct hivdec_ctx *ctx, enum vb2_buffer_state state)
 	return err ? -EIO : 0;
 }
 
+static int hivdec_h264_flush(struct hivdec_ctx *ctx)
+{
+	struct hivdec_h264_ctx *h = ctx->priv;
+	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+	int ret;
+
+	if (!h || !h->nslices || !dst)
+		return 1;
+	ret = hivdec_h264_decode(ctx, dst);
+	h->nslices = 0;
+	h->error = false;
+	return ret ? 1 : 0;
+}
+
 const struct hivdec_coded_fmt_ops hivdec_h264_fmt_ops = {
 	.adjust_fmt = hivdec_h264_adjust_fmt,
 	.start = hivdec_h264_start,
 	.stop = hivdec_h264_stop,
 	.run = hivdec_h264_run,
 	.done = hivdec_h264_done,
+	.flush = hivdec_h264_flush,
 	.try_ctrl = hivdec_h264_try_ctrl,
 };
