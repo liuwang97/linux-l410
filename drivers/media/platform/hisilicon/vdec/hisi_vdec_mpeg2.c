@@ -2,9 +2,10 @@
 /*
  * HiSilicon Kirin 990 video decoder: MPEG-2
  *
- * One request carries all slices of a picture (frame or field) with their
- * start codes. The VDH does not parse slice headers: the driver finds the
- * slices, reads quantiser_scale_code / intra_slice and the first macroblock
+ * A picture (frame or field) arrives in one request, or slice by slice in
+ * requests held with V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF (libva-v4l2-request);
+ * the slices, with their start codes, are gathered and decoded together.
+ * The VDH does not parse slice headers: the driver finds the slices, reads quantiser_scale_code / intra_slice and the first macroblock
  * address increment, and hands every slice over as a bit range starting
  * at the first macroblock. Message layout of the HiSilicon VFMW MPEG-2 HAL
  * as used on Kirin: picture message in slot 5, 32-byte slice messages
@@ -19,6 +20,7 @@
 #define MPEG2_MAX_SLICES	((HIVDEC_MSG_SLOTS - HIVDEC_SLOT_PIC) * HIVDEC_MSG_SLOT_BYTES / 32 - 9)
 #define MPEG2_SLICE_MSG_WORDS	8
 #define MPEG2_TOP_LEN		SZ_1M
+#define MPEG2_GATHER_LEN	SZ_4M
 
 /* MPEG-2 picture_structure */
 #define MPEG2_TOP_FIELD		1
@@ -26,7 +28,7 @@
 #define MPEG2_FRAME		3
 
 struct hivdec_mpeg2_slice {
-	u32 bitpos;		/* first macroblock, from the start of the OUTPUT buffer */
+	u32 bitpos;		/* first macroblock, from the start of the gathered data */
 	u32 bits;
 	u32 start_mb;
 	u8 qscale;
@@ -36,6 +38,16 @@ struct hivdec_mpeg2_slice {
 struct hivdec_mpeg2_ctx {
 	struct hivdec_aux_buf work;	/* pmv_top line buffer + MV output */
 	u32 pmv_top, mv;		/* IOVAs */
+
+	/* picture being gathered */
+	struct hivdec_aux_buf gather;
+	u32 used;
+	struct v4l2_ctrl_mpeg2_sequence seq;
+	struct v4l2_ctrl_mpeg2_picture pic;
+	struct v4l2_ctrl_mpeg2_quantisation quant;
+	bool carry;	/* current request is taken after the running decode */
+	bool error;
+
 	struct hivdec_mpeg2_slice *slices;	/* MPEG2_MAX_SLICES */
 	bool field_coded[VB2_MAX_FRAME];	/* per CAPTURE buffer: decoded as two fields */
 	/* previous picture, to pair field pictures (top_field_first is 0 for them) */
@@ -69,10 +81,14 @@ static int hivdec_mpeg2_start(struct hivdec_ctx *ctx)
 	}
 	/* MV output: up to 64 bytes per macroblock of a 4096 x 2304 picture */
 	ret = hivdec_aux_alloc(ctx->dev, &m->work, MPEG2_TOP_LEN + 256 * 144 * 64);
+	if (ret)
+		goto err_slices;
+	ret = hivdec_aux_alloc(ctx->dev, &m->gather,
+			       max_t(u32, MPEG2_GATHER_LEN,
+				     2 * ctx->coded_fmt.fmt.pix_mp.plane_fmt[0].sizeimage));
 	if (ret) {
-		kvfree(m->slices);
-		kfree(m);
-		return ret;
+		hivdec_aux_free(ctx->dev, &m->work);
+		goto err_slices;
 	}
 	m->last_dst = -1;
 	m->pmv_top = m->work.map.iova;
@@ -80,6 +96,11 @@ static int hivdec_mpeg2_start(struct hivdec_ctx *ctx)
 	hivdec_aux_sync_for_device(ctx->dev, &m->work);
 	ctx->priv = m;
 	return 0;
+
+err_slices:
+	kvfree(m->slices);
+	kfree(m);
+	return ret;
 }
 
 static void hivdec_mpeg2_stop(struct hivdec_ctx *ctx)
@@ -88,6 +109,7 @@ static void hivdec_mpeg2_stop(struct hivdec_ctx *ctx)
 
 	if (!m)
 		return;
+	hivdec_aux_free(ctx->dev, &m->gather);
 	hivdec_aux_free(ctx->dev, &m->work);
 	kvfree(m->slices);
 	kfree(m);
@@ -248,37 +270,22 @@ static int mpeg2_find_buf(struct hivdec_ctx *ctx, u64 ts)
 	return vb ? vb->index : -1;
 }
 
-static int hivdec_mpeg2_run(struct hivdec_ctx *ctx)
+/* decode the gathered picture into @dst: 0 = VDH started */
+static int hivdec_mpeg2_decode(struct hivdec_ctx *ctx, struct vb2_v4l2_buffer *dst)
 {
 	struct hivdec_dev *vdec = ctx->dev;
 	struct hivdec_mpeg2_ctx *m = ctx->priv;
-	struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
-	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
-	struct media_request *req = src->vb2_buf.req_obj.req;
 	struct hivdec_decoded_buffer *dbuf = vb2_to_hivdec_buf(&dst->vb2_buf);
-	struct hivdec_src_buffer *sbuf = vb2_to_hivdec_src(&src->vb2_buf);
 	const struct v4l2_pix_format_mplane *dfmt = &ctx->decoded_fmt.fmt.pix_mp;
-	const struct v4l2_ctrl_mpeg2_sequence *seq;
-	const struct v4l2_ctrl_mpeg2_picture *pic;
-	const struct v4l2_ctrl_mpeg2_quantisation *q;
-	const u8 *data = vb2_plane_vaddr(&src->vb2_buf, 0);
-	u32 size = vb2_get_plane_payload(&src->vb2_buf, 0);
+	const struct v4l2_ctrl_mpeg2_sequence *seq = &m->seq;
+	const struct v4l2_ctrl_mpeg2_picture *pic = &m->pic;
+	const struct v4l2_ctrl_mpeg2_quantisation *q = &m->quant;
+	const u8 *data = m->gather.cpu;
+	u32 size = m->used, src_iova = m->gather.map.iova;
 	u32 wmb, hmb, frame_hmb, stride, uvoff, base, slot_iova, i, j, n = 0, pre = 0;
 	u32 *msg, *slc, cur, fwd, bwd, fwd_fld = 0, bwd_fld = 0;
 	bool field, second;
-	int fi, bi, ret = 0;
-
-	if (req)
-		v4l2_ctrl_request_setup(req, &ctx->ctrl_hdl);
-	v4l2_m2m_buf_copy_metadata(src, dst, true);
-
-	seq = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_MPEG2_SEQUENCE);
-	pic = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_MPEG2_PICTURE);
-	q = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_MPEG2_QUANTISATION);
-	if (!data || !seq || !pic || !q) {
-		ret = -EINVAL;
-		goto out;
-	}
+	int fi, bi;
 
 	field = pic->picture_structure != MPEG2_FRAME;
 	/* the second field goes into the CAPTURE buffer held for the first one */
@@ -297,8 +304,7 @@ static int hivdec_mpeg2_run(struct hivdec_ctx *ctx)
 	    uvoff * 3 / 2 > vb2_plane_size(&dst->vb2_buf, 0)) {
 		dev_err(vdec->dev, "capture buffer too small for %ux%u\n",
 			seq->horizontal_size, seq->vertical_size);
-		ret = -EINVAL;
-		goto out;
+		return -EINVAL;
 	}
 
 	/* slices: start codes 00 00 01 01..af, each up to the next start code */
@@ -323,10 +329,8 @@ static int hivdec_mpeg2_run(struct hivdec_ctx *ctx)
 		}
 		i += 2;
 	}
-	if (!n) {
-		ret = -EINVAL;
-		goto out;
-	}
+	if (!n)
+		return -EINVAL;
 
 	/* references: the current picture stands in for missing ones */
 	cur = dbuf->map.iova;
@@ -371,7 +375,7 @@ static int hivdec_mpeg2_run(struct hivdec_ctx *ctx)
 	msg[7] = (m->mv + 15) >> 4;
 	/* picture-level stream: the first slice */
 	msg[9] = ((m->slices[0].bits + 24) & 0xffffff) |
-		 (((sbuf->map.iova + m->slices[0].bitpos / 8) & 15) * 8 +
+		 (((src_iova + m->slices[0].bitpos / 8) & 15) * 8 +
 		  m->slices[0].bitpos % 8) << 24;
 	{
 		u8 iq[64], nq[64];
@@ -395,10 +399,10 @@ static int hivdec_mpeg2_run(struct hivdec_ctx *ctx)
 	msg[63] = HIVDEC_ADDR(slot_iova);
 
 	/* slice messages; a dummy one conceals macroblocks before the first slice */
-	base = sbuf->map.iova & ~15;
+	base = src_iova & ~15;
 	slc = msg + 64;
 	if (m->slices[0].start_mb) {
-		u32 a = sbuf->map.iova + m->slices[0].bitpos / 8;
+		u32 a = src_iova + m->slices[0].bitpos / 8;
 
 		slc[0] = 1 | ((a & 15) * 8 + m->slices[0].bitpos % 8) << 24;
 		slc[1] = ((a & ~15) - base) >> 4;
@@ -411,7 +415,7 @@ static int hivdec_mpeg2_run(struct hivdec_ctx *ctx)
 	for (i = 0; i < n; i++) {
 		const struct hivdec_mpeg2_slice *s = &m->slices[i];
 		u32 *d = slc + MPEG2_SLICE_MSG_WORDS * (i + pre);
-		u32 a = sbuf->map.iova + s->bitpos / 8;
+		u32 a = src_iova + s->bitpos / 8;
 
 		d[0] = (s->bits & 0xffffff) | ((a & 15) * 8 + s->bitpos % 8) << 24;
 		d[1] = (((a & ~15) - base) >> 4) & 0xffffff;
@@ -463,13 +467,124 @@ static int hivdec_mpeg2_run(struct hivdec_ctx *ctx)
 		dev_info(vdec->dev, "mpeg2 %ux%u type %u struct %u%s slices %u first mb %u\n",
 			 seq->horizontal_size, seq->vertical_size, pic->picture_coding_type,
 			 pic->picture_structure, second ? " (2nd)" : "", n, m->slices[0].start_mb);
-out:
-	if (req)
-		v4l2_ctrl_request_complete(req, &ctx->ctrl_hdl);
-	if (ret)
-		return ret;
+	hivdec_aux_sync_for_device(vdec, &m->gather);
 	hivdec_hw_run(ctx);
 	return 0;
+}
+
+/*
+ * Gather the current request and decode the picture if the request does not
+ * hold the CAPTURE buffer: 1 = job done without hardware (CAPTURE buffer
+ * held), 0 = VDH started, <0 = error.
+ */
+static int hivdec_mpeg2_take(struct hivdec_ctx *ctx)
+{
+	struct hivdec_mpeg2_ctx *m = ctx->priv;
+	struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
+	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+	struct media_request *req = src->vb2_buf.req_obj.req;
+	const void *seq, *pic, *q;
+	const u8 *data = vb2_plane_vaddr(&src->vb2_buf, 0);
+	u32 size = vb2_get_plane_payload(&src->vb2_buf, 0);
+	int ret = 0;
+
+	seq = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_MPEG2_SEQUENCE);
+	pic = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_MPEG2_PICTURE);
+	q = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_MPEG2_QUANTISATION);
+	if (!data || !seq || !pic || !q || m->used + size + 64 > m->gather.size) {
+		ret = -EINVAL;
+	} else {
+		if (!m->used) {
+			memcpy(&m->seq, seq, sizeof(m->seq));
+			memcpy(&m->pic, pic, sizeof(m->pic));
+			memcpy(&m->quant, q, sizeof(m->quant));
+		}
+		memcpy(m->gather.cpu + m->used, data, size);
+		m->used += size;
+		memset(m->gather.cpu + m->used, 0, 64);
+	}
+	if (req)
+		v4l2_ctrl_request_complete(req, &ctx->ctrl_hdl);
+	if (ret) {
+		m->used = 0;
+		m->error = true;
+		return ret;
+	}
+	if (src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF)
+		return 1;
+	ret = hivdec_mpeg2_decode(ctx, dst);
+	m->used = 0;
+	if (ret)
+		m->error = true;
+	return ret;
+}
+
+static int hivdec_mpeg2_run(struct hivdec_ctx *ctx)
+{
+	struct hivdec_mpeg2_ctx *m = ctx->priv;
+	struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
+	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+	struct media_request *req = src->vb2_buf.req_obj.req;
+	const struct v4l2_ctrl_mpeg2_picture *pic;
+	int ret;
+
+	if (req)
+		v4l2_ctrl_request_setup(req, &ctx->ctrl_hdl);
+	v4l2_m2m_buf_copy_metadata(src, dst, true);
+
+	/*
+	 * Both fields of a frame share the CAPTURE buffer, so it stays held
+	 * across the field boundary: new picture parameters start a new
+	 * picture. Decode the gathered one first and take the current request
+	 * when the hardware is done.
+	 */
+	pic = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_MPEG2_PICTURE);
+	if (m->used && pic && memcmp(pic, &m->pic, sizeof(*pic))) {
+		ret = hivdec_mpeg2_decode(ctx, dst);
+		m->used = 0;
+		if (!ret) {
+			m->carry = true;
+			return 0;
+		}
+		m->error = true;
+	}
+	return hivdec_mpeg2_take(ctx);
+}
+
+static int hivdec_mpeg2_done(struct hivdec_ctx *ctx, enum vb2_buffer_state state)
+{
+	struct hivdec_mpeg2_ctx *m = ctx->priv;
+	bool err;
+	int ret;
+
+	if (state != VB2_BUF_STATE_DONE)
+		m->error = true;
+	if (m->carry) {
+		m->carry = false;
+		ret = hivdec_mpeg2_take(ctx);
+		if (!ret)
+			return 1;	/* VDH running again for this job */
+		if (ret > 0)
+			return 0;	/* CAPTURE buffer stays held */
+		return ret;
+	}
+	err = m->error;
+	m->error = false;
+	return err ? -EIO : 0;
+}
+
+static int hivdec_mpeg2_flush(struct hivdec_ctx *ctx)
+{
+	struct hivdec_mpeg2_ctx *m = ctx->priv;
+	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+	int ret;
+
+	if (!m || !m->used || !dst)
+		return 1;
+	ret = hivdec_mpeg2_decode(ctx, dst);
+	m->used = 0;
+	m->error = false;
+	return ret ? 1 : 0;
 }
 
 const struct hivdec_coded_fmt_ops hivdec_mpeg2_fmt_ops = {
@@ -477,5 +592,7 @@ const struct hivdec_coded_fmt_ops hivdec_mpeg2_fmt_ops = {
 	.start = hivdec_mpeg2_start,
 	.stop = hivdec_mpeg2_stop,
 	.run = hivdec_mpeg2_run,
+	.done = hivdec_mpeg2_done,
+	.flush = hivdec_mpeg2_flush,
 	.try_ctrl = hivdec_mpeg2_try_ctrl,
 };
