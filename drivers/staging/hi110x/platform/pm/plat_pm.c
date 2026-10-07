@@ -476,6 +476,48 @@ static void release_tty_after_send_msg(struct ps_core_s *ps_core_d)
 #endif
 
 #ifdef _PRE_CONFIG_HISI_S3S4_POWER_STATE
+/*
+ * systemd keeps the user session frozen until its write to /sys/power/state
+ * returns, which is only after the PM_POST_* notifiers have run. Powering WiFi
+ * and BT up from the notifier (tens of seconds when the HCI setup times out)
+ * therefore leaves the desktop unresponsive after wake. An aborted suspend
+ * attempt is also retried at once, and the chip should not be powered up and
+ * down again in between. Resume it from a delayed work item, which the next
+ * suspend cancels if it has not run yet.
+ */
+#define PM_S3S4_RESUME_DELAY_MS 1500
+
+static bool g_pm_s3s4_suspended;
+
+static void pm_s3s4_resume_work(struct work_struct *work)
+{
+    resume_hi110x();
+    g_pm_s3s4_suspended = false;
+}
+
+static DECLARE_DELAYED_WORK(g_pm_s3s4_resume_dwork, pm_s3s4_resume_work);
+
+static void pm_s3s4_suspend(void)
+{
+    if (cancel_delayed_work_sync(&g_pm_s3s4_resume_dwork)) {
+        ps_print_info("S3S4 resume still pending, chip stays suspended\n");
+    }
+
+    /* both notifiers come here; suspend the chip once */
+    if (g_pm_s3s4_suspended) {
+        return;
+    }
+
+    suspend_hi110x();
+    g_pm_s3s4_suspended = true;
+}
+
+static void pm_s3s4_resume(void)
+{
+    queue_delayed_work(system_unbound_wq, &g_pm_s3s4_resume_dwork,
+                       msecs_to_jiffies(PM_S3S4_RESUME_DELAY_MS));
+}
+
 static int pf_suspend_notify(struct notifier_block *notify_block, unsigned long mode, void *unused)
 {
     struct pm_drv_data *pm_data = pm_get_drvdata(BUART);
@@ -491,13 +533,13 @@ static int pf_suspend_notify(struct notifier_block *notify_block, unsigned long 
 #ifdef _PRE_CONFIG_ARCH_KIRIN_S4_FEATURE
             set_board_s4(mode);
 #endif
-            resume_hi110x();
+            pm_s3s4_resume();
             break;
 
         case PM_SUSPEND_PREPARE:
         case PM_HIBERNATION_PREPARE:
             ps_print_info("[BUART] S3S4 suspend now!\n");
-            suspend_hi110x();
+            pm_s3s4_suspend();
 #ifdef _PRE_CONFIG_ARCH_KIRIN_S4_FEATURE
             set_board_s4(mode);
 #endif
@@ -523,13 +565,13 @@ static int pf_gnss_sr_notify(struct notifier_block *notify_block, unsigned long 
 #ifdef _PRE_CONFIG_ARCH_KIRIN_S4_FEATURE
             set_board_s4(mode);
 #endif
-            resume_hi110x();
+            pm_s3s4_resume();
             break;
 
         case PM_SUSPEND_PREPARE:
         case PM_HIBERNATION_PREPARE:
             ps_print_info("[GUART] S3S4 suspend now!\n");
-            suspend_hi110x();
+            pm_s3s4_suspend();
 #ifdef _PRE_CONFIG_ARCH_KIRIN_S4_FEATURE
             set_board_s4(mode);
 #endif
@@ -3505,10 +3547,15 @@ STATIC int low_power_remove(struct pm_drv_data *pm_data, int index)
     oal_wake_lock_exit(&pm_data->bus_wake_lock);
     oal_wake_lock_exit(&pm_data->bt_wake_lock);
     oal_wake_lock_exit(&pm_data->gnss_wake_lock);
-    /* free platform driver data struct */
-    kfree(pm_data);
 
     pm_clr_drvdata(index);
+#ifdef _PRE_CONFIG_HISI_S3S4_POWER_STATE
+    /* the notifiers stop queueing it now; a running resume may still use pm_data */
+    cancel_delayed_work_sync(&g_pm_s3s4_resume_dwork);
+#endif
+
+    /* free platform driver data struct */
+    kfree(pm_data);
 
     return ret;
 }
