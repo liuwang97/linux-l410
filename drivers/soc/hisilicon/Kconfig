@@ -39,13 +39,17 @@ config KUNPENG_HCCS
 	  power consumption on Kunpeng SoC.
 
 config L410_DEADMAN
-	bool "Huawei L410 bring-up deadman watchdog"
+	bool "Huawei L410 AP watchdog takeover and bring-up deadman"
 	depends on ARM64
 	help
-	  Arms the Kirin 990 AP SP805 watchdog early in boot and never pets it,
-	  so a hung or unreachable test kernel resets the machine back to the
-	  default boot entry. Only useful while bringing up new kernels on the
-	  Huawei L410; boot with l410_deadman=0 to disable.
+	  The L410 firmware starts the Kirin 990 AP SP805 watchdog before it
+	  enters the kernel, and BL31 delivers its interrupt as an FIQ, so a
+	  kernel that does not take the watchdog over panics about a minute
+	  after boot. This stops it early in boot and installs an FIQ handler
+	  that reports an expiry. Say Y on the Huawei L410.
+
+	  Booting with l410_deadman=<seconds> arms it instead and never pets
+	  it, so a hung or unreachable test kernel resets the machine.
 
 config KIRIN990_SUSPEND
 	bool "HiSilicon Kirin 990 system suspend"
