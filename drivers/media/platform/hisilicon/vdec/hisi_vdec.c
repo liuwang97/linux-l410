@@ -111,6 +111,34 @@ static const struct hivdec_ctrl_desc hivdec_vp9_ctrls[] = {
 	},
 };
 
+static const struct hivdec_ctrl_desc hivdec_vp8_ctrls[] = {
+	{ .cfg.id = V4L2_CID_STATELESS_VP8_FRAME },
+	{
+		.cfg.id = V4L2_CID_MPEG_VIDEO_VP8_PROFILE,
+		.cfg.min = V4L2_MPEG_VIDEO_VP8_PROFILE_0,
+		.cfg.max = V4L2_MPEG_VIDEO_VP8_PROFILE_3,
+		.cfg.def = V4L2_MPEG_VIDEO_VP8_PROFILE_0,
+	},
+};
+
+static const struct hivdec_ctrl_desc hivdec_mpeg2_ctrls[] = {
+	{ .cfg.id = V4L2_CID_STATELESS_MPEG2_SEQUENCE },
+	{ .cfg.id = V4L2_CID_STATELESS_MPEG2_PICTURE },
+	{ .cfg.id = V4L2_CID_STATELESS_MPEG2_QUANTISATION },
+	{
+		.cfg.id = V4L2_CID_MPEG_VIDEO_MPEG2_PROFILE,
+		.cfg.min = V4L2_MPEG_VIDEO_MPEG2_PROFILE_SIMPLE,
+		.cfg.max = V4L2_MPEG_VIDEO_MPEG2_PROFILE_MAIN,
+		.cfg.def = V4L2_MPEG_VIDEO_MPEG2_PROFILE_MAIN,
+	},
+	{
+		.cfg.id = V4L2_CID_MPEG_VIDEO_MPEG2_LEVEL,
+		.cfg.min = V4L2_MPEG_VIDEO_MPEG2_LEVEL_LOW,
+		.cfg.max = V4L2_MPEG_VIDEO_MPEG2_LEVEL_HIGH,
+		.cfg.def = V4L2_MPEG_VIDEO_MPEG2_LEVEL_MAIN,
+	},
+};
+
 static const struct hivdec_coded_fmt_desc hivdec_coded_fmts[] = {
 	{
 		.fourcc = V4L2_PIX_FMT_H264_SLICE,
@@ -164,6 +192,41 @@ static const struct hivdec_coded_fmt_desc hivdec_coded_fmts[] = {
 		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_10_fmts),
 		.height_align = 64,
 		.pad = 16,
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_VP8_FRAME,
+		.frmsize = {
+			.min_width = 16,
+			.max_width = 4096,
+			.step_width = 16,
+			.min_height = 16,
+			.max_height = 2304,
+			.step_height = 16,
+		},
+		.ctrls = hivdec_vp8_ctrls,
+		.num_ctrls = ARRAY_SIZE(hivdec_vp8_ctrls),
+		.ops = &hivdec_vp8_fmt_ops,
+		.decoded_fmts = hivdec_yuv420_fmts,
+		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_fmts),
+		.height_align = 16,
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_MPEG2_SLICE,
+		.frmsize = {
+			.min_width = 16,
+			.max_width = 4096,
+			.step_width = 16,
+			.min_height = 16,
+			.max_height = 2304,
+			.step_height = 16,
+		},
+		.ctrls = hivdec_mpeg2_ctrls,
+		.num_ctrls = ARRAY_SIZE(hivdec_mpeg2_ctrls),
+		.ops = &hivdec_mpeg2_fmt_ops,
+		.decoded_fmts = hivdec_yuv420_fmts,
+		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_fmts),
+		.subsystem_flags = VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF,
+		.height_align = 32,
 	},
 };
 

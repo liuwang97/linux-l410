@@ -136,7 +136,8 @@ enum hivdec_std {
 #define HIVDEC_SLOT_PIC		5	/* picture message */
 #define HIVDEC_SLOT_SLICE0	6	/* first slice message */
 #define HIVDEC_MAX_SLICES	200
-#define HIVDEC_MSG_SLOTS	(HIVDEC_SLOT_SLICE0 + HIVDEC_MAX_SLICES + 1)
+/* MPEG-2 may carry a 32-byte slice message per macroblock of a 1920x1088 picture */
+#define HIVDEC_MSG_SLOTS	216
 
 /* bus address as stored by the VDH */
 #define HIVDEC_ADDR(a)		((u32)((a) >> 4))
@@ -328,5 +329,7 @@ void *hivdec_find_control_data(struct hivdec_ctx *ctx, u32 id);
 extern const struct hivdec_coded_fmt_ops hivdec_h264_fmt_ops;
 extern const struct hivdec_coded_fmt_ops hivdec_hevc_fmt_ops;
 extern const struct hivdec_coded_fmt_ops hivdec_vp9_fmt_ops;
+extern const struct hivdec_coded_fmt_ops hivdec_vp8_fmt_ops;
+extern const struct hivdec_coded_fmt_ops hivdec_mpeg2_fmt_ops;
 
 #endif /* HISI_VDEC_H_ */
