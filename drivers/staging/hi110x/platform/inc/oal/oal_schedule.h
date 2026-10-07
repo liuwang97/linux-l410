@@ -178,9 +178,17 @@ OAL_STATIC OAL_INLINE int32_t oal_print_rate_limit(unsigned long timeout)
 }
 #endif
 
+/*
+ * These locks only mark the chip or the bus as busy. They used to be wakeup
+ * sources, so every transfer reported a wakeup event, and a suspend started
+ * through /sys/power/wakeup_count (Plasma does that) was always aborted by the
+ * traffic of the driver shutting WiFi and BT down for it. Keep the lock count
+ * and the active state the driver checks, but leave the PM core out of it.
+ */
 typedef struct _oal_wakelock_stru_ {
 #if ((LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37)) && (_PRE_OS_VERSION_LINUX == _PRE_OS_VERSION))
-    struct wakeup_source *st_wakelock;  // wakelock锁 (registered wakeup source)
+    struct timer_list timer;  /* ends an oal_wake_lock_timeout() hold */
+    bool active;
     const char *name;
     oal_spin_lock_stru lock;           // wakelock锁操作spinlock锁
     oal_dlist_head_stru list;
@@ -202,6 +210,27 @@ extern oal_dlist_head_stru g_wakelock_head;
 int32_t oal_print_all_wakelock_buff(char *buf, int32_t buf_len);
 int32_t oal_set_wakelock_debuglevel(const char *name, uint32_t level);
 
+#if ((LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37)) && (_PRE_OS_VERSION_LINUX == _PRE_OS_VERSION))
+static inline void oal_wakelock_timer_fn(struct timer_list *t)
+{
+    oal_wakelock_stru *pst_wakelock = timer_container_of(pst_wakelock, t, timer);
+    unsigned long flags;
+
+    oal_spin_lock_irq_save(&pst_wakelock->lock, &flags);
+    pst_wakelock->active = false;
+    oal_spin_unlock_irq_restore(&pst_wakelock->lock, &flags);
+}
+
+/* caller holds pst_wakelock->lock */
+static inline void oal_wakelock_set(oal_wakelock_stru *pst_wakelock, bool active)
+{
+    pst_wakelock->active = active;
+    if (pst_wakelock->timer.function != NULL) {
+        timer_delete(&pst_wakelock->timer);
+    }
+}
+#endif
+
 OAL_STATIC OAL_INLINE void oal_wake_lock_init(oal_wakelock_stru *pst_wakelock, char *name)
 {
 #if ((LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37)) && (_PRE_OS_VERSION_LINUX == _PRE_OS_VERSION))
@@ -211,7 +240,7 @@ OAL_STATIC OAL_INLINE void oal_wake_lock_init(oal_wakelock_stru *pst_wakelock, c
     oal_spin_lock_init(&g_wakelock_lock);
 #endif
     pst_wakelock->name = name ? name : "wake_lock_null";
-    pst_wakelock->st_wakelock = wakeup_source_register(NULL, pst_wakelock->name);
+    timer_setup(&pst_wakelock->timer, oal_wakelock_timer_fn, 0);
     oal_spin_lock_init(&pst_wakelock->lock);
     pst_wakelock->lock_count = 0;
     pst_wakelock->locked_addr = 0;
@@ -229,8 +258,10 @@ OAL_STATIC OAL_INLINE void oal_wake_lock_exit(oal_wakelock_stru *pst_wakelock)
     oal_spin_lock_irq_save(&g_wakelock_lock, &flags);
     oal_dlist_delete_entry(&pst_wakelock->list);
     oal_spin_unlock_irq_restore(&g_wakelock_lock, &flags);
-    wakeup_source_unregister(pst_wakelock->st_wakelock);
-    pst_wakelock->st_wakelock = NULL;
+    if (pst_wakelock->timer.function != NULL) {
+        timer_delete_sync(&pst_wakelock->timer);
+    }
+    pst_wakelock->active = false;
 #endif
 }
 
@@ -247,7 +278,7 @@ OAL_STATIC OAL_INLINE void oal_wake_lock(oal_wakelock_stru *pst_wakelock)
 
     oal_spin_lock_irq_save(&pst_wakelock->lock, &flags);
     if (!pst_wakelock->lock_count) {
-        __pm_stay_awake(pst_wakelock->st_wakelock);
+        oal_wakelock_set(pst_wakelock, true);
         pst_wakelock->locked_addr = (uintptr_t)_RET_IP_;
     }
     pst_wakelock->lock_count++;
@@ -274,7 +305,7 @@ OAL_STATIC OAL_INLINE void oal_wake_unlock(oal_wakelock_stru *pst_wakelock)
     if (pst_wakelock->lock_count) {
         pst_wakelock->lock_count--;
         if (!pst_wakelock->lock_count) {
-            __pm_relax(pst_wakelock->st_wakelock);
+            oal_wakelock_set(pst_wakelock, false);
             pst_wakelock->locked_addr = (uintptr_t)0x0;
         }
 
@@ -294,7 +325,7 @@ OAL_STATIC OAL_INLINE int32_t oal_wakelock_active(oal_wakelock_stru *pst_wakeloc
         oal_warn_on(1);
         return 0;
     }
-    return pst_wakelock->st_wakelock ? pst_wakelock->st_wakelock->active : 0;
+    return pst_wakelock->active;
 #else
     return 0;
 #endif
@@ -310,10 +341,16 @@ OAL_STATIC OAL_INLINE void oal_wake_lock_timeout(oal_wakelock_stru *pst_wakelock
     unsigned long flags;
 
     oal_spin_lock_irq_save(&pst_wakelock->lock, &flags);
-    if (msec < 0) {
-        __pm_stay_awake(pst_wakelock->st_wakelock);
+    if (msec <= 0 || pst_wakelock->timer.function == NULL) {
+        /* < 0: no timeout, 0: release right now, as __pm_wakeup_event() did */
+        oal_wakelock_set(pst_wakelock, msec != 0);
     } else {
-        __pm_wakeup_event(pst_wakelock->st_wakelock, (uint32_t)msec);
+        unsigned long expires = jiffies + msecs_to_jiffies((uint32_t)msec);
+
+        pst_wakelock->active = true;
+        if (!timer_pending(&pst_wakelock->timer) || time_after(expires, pst_wakelock->timer.expires)) {
+            mod_timer(&pst_wakelock->timer, expires);
+        }
     }
 
     pst_wakelock->locked_addr = _RET_IP_;
@@ -330,7 +367,7 @@ OAL_STATIC OAL_INLINE void oal_wake_unlock_force(oal_wakelock_stru *pst_wakelock
 
     oal_spin_lock_irq_save(&pst_wakelock->lock, &flags);
 
-    __pm_relax(pst_wakelock->st_wakelock);
+    oal_wakelock_set(pst_wakelock, false);
     pst_wakelock->locked_addr = (uintptr_t)0x0;
     pst_wakelock->lock_count = 0;
 

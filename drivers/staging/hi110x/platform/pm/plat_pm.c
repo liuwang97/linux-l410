@@ -947,7 +947,7 @@ static void bfg_wake_lock(struct pm_drv_data *pm_data)
 
     oal_spin_lock_irq_save(&pst_bfg_wake_lock->lock, &flags);
     if (oal_wakelock_active(pst_bfg_wake_lock) == 0) {
-        __pm_stay_awake(pst_bfg_wake_lock->st_wakelock);
+        oal_wakelock_set(pst_bfg_wake_lock, true);
         pst_bfg_wake_lock->locked_addr = (uintptr_t)_RET_IP_;
         pst_bfg_wake_lock->lock_count++;
         if (oal_unlikely(pst_bfg_wake_lock->debug)) {
@@ -982,7 +982,7 @@ static void bfg_wake_unlock(struct pm_drv_data *pm_data)
 
     if (oal_wakelock_active(pst_bfg_wake_lock)) {
         pst_bfg_wake_lock->lock_count--;
-        __pm_relax(pst_bfg_wake_lock->st_wakelock);
+        oal_wakelock_set(pst_bfg_wake_lock, false);
         pst_bfg_wake_lock->locked_addr = 0UL;
 
         if (oal_unlikely(pst_bfg_wake_lock->debug)) {
