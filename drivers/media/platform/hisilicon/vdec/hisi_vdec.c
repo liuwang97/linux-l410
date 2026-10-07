@@ -28,6 +28,8 @@ MODULE_PARM_DESC(clk_level, "decoder clock: 0 = 480 MHz, 1 = 332 MHz, 2 = 277 MH
 /* ------------------------------------------------------------------ formats */
 
 static const u32 hivdec_yuv420_fmts[] = { V4L2_PIX_FMT_NV12 };
+/* 8-bit streams decode to NV12, 10-bit ones to P010 */
+static const u32 hivdec_yuv420_10_fmts[] = { V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_P010 };
 
 static const struct hivdec_ctrl_desc hivdec_h264_ctrls[] = {
 	{ .cfg.id = V4L2_CID_STATELESS_H264_DECODE_PARAMS },
@@ -103,7 +105,8 @@ static const struct hivdec_ctrl_desc hivdec_vp9_ctrls[] = {
 	{
 		.cfg.id = V4L2_CID_MPEG_VIDEO_VP9_PROFILE,
 		.cfg.min = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
-		.cfg.max = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+		.cfg.max = V4L2_MPEG_VIDEO_VP9_PROFILE_2,
+		.cfg.menu_skip_mask = BIT(V4L2_MPEG_VIDEO_VP9_PROFILE_1),
 		.cfg.def = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
 	},
 };
@@ -134,14 +137,14 @@ static const struct hivdec_coded_fmt_desc hivdec_coded_fmts[] = {
 			.max_width = 4096,
 			.step_width = 8,
 			.min_height = 64,
-			.max_height = 2304,
+			.max_height = 4096,
 			.step_height = 8,
 		},
 		.ctrls = hivdec_hevc_ctrls,
 		.num_ctrls = ARRAY_SIZE(hivdec_hevc_ctrls),
 		.ops = &hivdec_hevc_fmt_ops,
-		.decoded_fmts = hivdec_yuv420_fmts,
-		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_fmts),
+		.decoded_fmts = hivdec_yuv420_10_fmts,
+		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_10_fmts),
 		.height_align = 64,
 	},
 	{
@@ -157,8 +160,8 @@ static const struct hivdec_coded_fmt_desc hivdec_coded_fmts[] = {
 		.ctrls = hivdec_vp9_ctrls,
 		.num_ctrls = ARRAY_SIZE(hivdec_vp9_ctrls),
 		.ops = &hivdec_vp9_fmt_ops,
-		.decoded_fmts = hivdec_yuv420_fmts,
-		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_fmts),
+		.decoded_fmts = hivdec_yuv420_10_fmts,
+		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_10_fmts),
 		.height_align = 64,
 		.pad = 16,
 	},
@@ -175,17 +178,31 @@ static const struct hivdec_coded_fmt_desc *hivdec_find_coded_fmt_desc(u32 fourcc
 }
 
 /*
- * Decoded frames: NV12 in one plane. The VDH writes the luma at YSTADDR_1D
- * and the interleaved chroma UVOFFSET_1D bytes further, with a 64-byte
- * aligned pitch; the height is padded to whole macroblock pairs or CTBs.
+ * Decoded frames: NV12 (P010 for 10-bit streams) in one plane. The VDH
+ * writes the luma at YSTADDR_1D and the interleaved chroma UVOFFSET_1D bytes
+ * further, with a pitch of a multiple of 64 samples; the height is padded to
+ * whole macroblock pairs or CTBs.
  */
+static u32 hivdec_decoded_pixelformat(struct hivdec_ctx *ctx)
+{
+	const struct hivdec_coded_fmt_desc *desc = ctx->coded_fmt_desc;
+	u32 want = ctx->bit_depth > 8 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+	unsigned int i;
+
+	for (i = 0; i < desc->num_decoded_fmts; i++)
+		if (desc->decoded_fmts[i] == want)
+			return want;
+	return desc->decoded_fmts[0];
+}
+
 static void hivdec_fill_decoded_pixfmt(struct hivdec_ctx *ctx,
 				       struct v4l2_pix_format_mplane *pix_mp)
 {
 	u32 pad = ctx->coded_fmt_desc->pad;
 	u32 w = ALIGN(pix_mp->width, 16);
 	u32 h = ALIGN(pix_mp->height + pad, ctx->coded_fmt_desc->height_align);
-	u32 stride = ALIGN(w + pad, 64);
+	u32 bps = pix_mp->pixelformat == V4L2_PIX_FMT_P010 ? 2 : 1;
+	u32 stride = ALIGN(w + pad, 64) * bps;
 
 	pix_mp->width = w;
 	pix_mp->height = h;
@@ -201,7 +218,7 @@ static void hivdec_reset_decoded_fmt(struct hivdec_ctx *ctx)
 
 	memset(f, 0, sizeof(*f));
 	f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-	f->fmt.pix_mp.pixelformat = ctx->coded_fmt_desc->decoded_fmts[0];
+	f->fmt.pix_mp.pixelformat = hivdec_decoded_pixelformat(ctx);
 	f->fmt.pix_mp.width = ctx->coded_fmt.fmt.pix_mp.width;
 	f->fmt.pix_mp.height = ctx->coded_fmt.fmt.pix_mp.height;
 	f->fmt.pix_mp.colorspace = V4L2_COLORSPACE_REC709;
@@ -243,8 +260,30 @@ static int hivdec_try_ctrl(struct v4l2_ctrl *ctrl)
 	return 0;
 }
 
+/* a new bit depth (SPS, VP9 profile 2) switches the decoded format */
+static int hivdec_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct hivdec_ctx *ctx = container_of(ctrl->handler, struct hivdec_ctx, ctrl_hdl);
+	const struct hivdec_coded_fmt_desc *desc = ctx->coded_fmt_desc;
+	struct vb2_queue *vq;
+	unsigned int depth;
+
+	if (!desc->ops->bit_depth)
+		return 0;
+	depth = desc->ops->bit_depth(ctrl);
+	if (!depth || depth == ctx->bit_depth)
+		return 0;
+	vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+	if (vb2_is_busy(vq))
+		return 0;	/* the codec rejects the mismatch when decoding */
+	ctx->bit_depth = depth;
+	hivdec_reset_decoded_fmt(ctx);
+	return 0;
+}
+
 static const struct v4l2_ctrl_ops hivdec_ctrl_ops = {
 	.try_ctrl = hivdec_try_ctrl,
+	.s_ctrl = hivdec_s_ctrl,
 };
 
 static int hivdec_enum_framesizes(struct file *file, void *priv,
@@ -285,14 +324,9 @@ static int hivdec_try_capture_fmt(struct file *file, void *priv,
 {
 	struct v4l2_pix_format_mplane *pix_mp = &f->fmt.pix_mp;
 	struct hivdec_ctx *ctx = file_to_hivdec_ctx(file);
-	const struct hivdec_coded_fmt_desc *desc = ctx->coded_fmt_desc;
-	unsigned int i;
 
-	for (i = 0; i < desc->num_decoded_fmts; i++)
-		if (desc->decoded_fmts[i] == pix_mp->pixelformat)
-			break;
-	if (i == desc->num_decoded_fmts)
-		pix_mp->pixelformat = desc->decoded_fmts[0];
+	/* one decoded format at a time: it follows the bit depth */
+	pix_mp->pixelformat = hivdec_decoded_pixelformat(ctx);
 
 	/* the decoded size always follows the coded size */
 	pix_mp->width = ctx->coded_fmt.fmt.pix_mp.width;
@@ -366,6 +400,7 @@ static int hivdec_s_output_fmt(struct file *file, void *priv,
 		return -EINVAL;
 	ctx->coded_fmt_desc = desc;
 	ctx->coded_fmt = *f;
+	ctx->bit_depth = 8;
 
 	hivdec_reset_decoded_fmt(ctx);
 	cap_fmt = &ctx->decoded_fmt;
@@ -404,9 +439,9 @@ static int hivdec_enum_capture_fmt(struct file *file, void *priv,
 {
 	struct hivdec_ctx *ctx = file_to_hivdec_ctx(file);
 
-	if (f->index >= ctx->coded_fmt_desc->num_decoded_fmts)
+	if (f->index)
 		return -EINVAL;
-	f->pixelformat = ctx->coded_fmt_desc->decoded_fmts[f->index];
+	f->pixelformat = hivdec_decoded_pixelformat(ctx);
 	return 0;
 }
 
@@ -963,6 +998,7 @@ static int hivdec_open(struct file *filp)
 	if (!ctx)
 		return -ENOMEM;
 	ctx->dev = vdec;
+	ctx->bit_depth = 8;
 	hivdec_reset_coded_fmt(ctx);
 	hivdec_reset_decoded_fmt(ctx);
 	v4l2_fh_init(&ctx->fh, video_devdata(filp));

@@ -20,9 +20,9 @@
 #define HEVC_APC_SLOTS		16
 #define HEVC_STREAM_SIZE_MIN	SZ_8M
 
-/* line buffers, vendor sizes for 4096 x 2304 */
+/* line buffers, vendor sizes for 4096 x 4096 */
 #define HEVC_TOP_LEN		(64 * 4 * 4096)
-#define HEVC_LEFT_LEN		(64 * 4 * 2304)
+#define HEVC_LEFT_LEN		(64 * 4 * 4096)
 #define HEVC_TILE_INFO_LEN	2048
 #define HEVC_HEAD_LEN		SZ_256K
 
@@ -146,13 +146,21 @@ static int hivdec_hevc_try_ctrl(struct hivdec_ctx *ctx, struct v4l2_ctrl *ctrl)
 
 		if (sps->chroma_format_idc != 1)
 			return -EINVAL;
-		if (sps->bit_depth_luma_minus8 > 2 || sps->bit_depth_chroma_minus8 > 2)
+		if (sps->bit_depth_luma_minus8 > 2 ||
+		    sps->bit_depth_chroma_minus8 != sps->bit_depth_luma_minus8)
 			return -EINVAL;
 		if (sps->pic_width_in_luma_samples > 4096 ||
-		    sps->pic_height_in_luma_samples > 2304)
+		    sps->pic_height_in_luma_samples > 4096)
 			return -EINVAL;
 	}
 	return 0;
+}
+
+static unsigned int hivdec_hevc_bit_depth(const struct v4l2_ctrl *ctrl)
+{
+	if (ctrl->id != V4L2_CID_STATELESS_HEVC_SPS)
+		return 0;
+	return ctrl->p_new.p_hevc_sps->bit_depth_luma_minus8 + 8;
 }
 
 /* ---------------------------------------------------------------- helpers */
@@ -519,7 +527,7 @@ static int hivdec_hevc_run(struct hivdec_ctx *ctx)
 	struct hevc_pic pic = { };
 	const u8 *data = vb2_plane_vaddr(&src->vb2_buf, 0);
 	u32 size = vb2_get_plane_payload(&src->vb2_buf, 0);
-	u32 *msg, *head, i, k, n, used = 0, ystride, cfg0, cfg1, mvsize;
+	u32 *msg, *head, i, k, n, used = 0, ystride, cfg0, cfg1, mvsize, pitch, fmt_h;
 	u32 log2_min_cb, log2_min_tb, max_cu_depth, slot, nsc;
 	bool abs_off;
 	int ret = 0;
@@ -547,9 +555,13 @@ static int hivdec_hevc_run(struct hivdec_ctx *ctx)
 	pic.nctbs = pic.wctb * pic.hctb;
 	pic.w64 = ALIGN(sps->pic_width_in_luma_samples, 64);
 	pic.ah = ALIGN(sps->pic_height_in_luma_samples, 64);
-	ystride = pic.w64 * 8;
-	if (pic.w64 > ctx->decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline ||
-	    pic.w64 * pic.ah * 3 / 2 > vb2_plane_size(&dst->vb2_buf, 0)) {
+	/* 8-bit: NV12; 10-bit: 16-bit samples (P010) */
+	pitch = ctx->decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
+	fmt_h = ctx->decoded_fmt.fmt.pix_mp.height;
+	ystride = pitch * 8;
+	if ((sps->bit_depth_luma_minus8 ? 2 : 1) != hivdec_decoded_bps(ctx) ||
+	    pic.w64 * hivdec_decoded_bps(ctx) > pitch || pic.ah > fmt_h ||
+	    pitch * fmt_h * 3 / 2 > vb2_plane_size(&dst->vb2_buf, 0)) {
 		dev_err(vdec->dev, "capture buffer too small for %ux%u\n",
 			sps->pic_width_in_luma_samples, sps->pic_height_in_luma_samples);
 		ret = -EINVAL;
@@ -771,7 +783,7 @@ static int hivdec_hevc_run(struct hivdec_ctx *ctx)
 	vdh_write(vdec, VDH_PPFD_TO, VDH_TIMEOUT_DEFAULT);
 	vdh_write(vdec, VDH_YSTADDR_1D, (pic.luma & ~15) >> 4);
 	vdh_write(vdec, VDH_YSTRIDE_1D, ystride);
-	vdh_write(vdec, VDH_UVOFFSET_1D, pic.w64 * pic.ah);
+	vdh_write(vdec, VDH_UVOFFSET_1D, pitch * fmt_h);
 	vdh_write(vdec, VDH_HEAD_INF_OFFSET, 0);
 	vdh_write(vdec, VDH_YSTRIDE_2BIT, 0);
 	vdh_write(vdec, VDH_YOFFSET_2BIT, 0);
@@ -807,4 +819,5 @@ const struct hivdec_coded_fmt_ops hivdec_hevc_fmt_ops = {
 	.stop = hivdec_hevc_stop,
 	.run = hivdec_hevc_run,
 	.try_ctrl = hivdec_hevc_try_ctrl,
+	.bit_depth = hivdec_hevc_bit_depth,
 };

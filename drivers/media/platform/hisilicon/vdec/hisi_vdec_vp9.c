@@ -185,12 +185,21 @@ static int hivdec_vp9_try_ctrl(struct hivdec_ctx *ctx, struct v4l2_ctrl *ctrl)
 	if (ctrl->id == V4L2_CID_STATELESS_VP9_FRAME) {
 		const struct v4l2_ctrl_vp9_frame *f = ctrl->p_new.p_vp9_frame;
 
-		if (f->profile != 0 || f->bit_depth != 8)
+		/* 4:2:0 only: profile 0 (8-bit) and profile 2 (10-bit) */
+		if (!((f->profile == 0 && f->bit_depth == 8) ||
+		      (f->profile == 2 && f->bit_depth == 10)))
 			return -EINVAL;
 		if (f->frame_width_minus_1 >= 4096 || f->frame_height_minus_1 >= 2304)
 			return -EINVAL;
 	}
 	return 0;
+}
+
+static unsigned int hivdec_vp9_bit_depth(const struct v4l2_ctrl *ctrl)
+{
+	if (ctrl->id != V4L2_CID_STATELESS_VP9_FRAME)
+		return 0;
+	return ctrl->p_new.p_vp9_frame->bit_depth;
 }
 
 /* ---------------------------------------------------------------- probabilities */
@@ -351,7 +360,7 @@ static int hivdec_vp9_run(struct hivdec_ctx *ctx)
 	const struct v4l2_pix_format_mplane *dfmt = &ctx->decoded_fmt.fmt.pix_mp;
 	const u8 *data = vb2_plane_vaddr(&src->vb2_buf, 0);
 	u32 size = vb2_get_plane_payload(&src->vb2_buf, 0);
-	u32 w, h, mi_cols, mi_rows, sb_cols, sb_rows, stride, uvoff;
+	u32 w, h, mi_cols, mi_rows, sb_cols, sb_rows, stride, uvoff, bps;
 	u32 *msg, *head, i, s, r, pos, ntiles = 0, ctb = 0, base, prev_row_sb = 0, row_acc = 0;
 	u32 tile_rows, tile_cols, tr, tc;
 	int refs[3], ids[3], cur = dst->vb2_buf.index, ret = 0;
@@ -379,7 +388,9 @@ static int hivdec_vp9_run(struct hivdec_ctx *ctx)
 	sb_rows = (mi_rows + 7) >> 3;
 	stride = dfmt->plane_fmt[0].bytesperline;
 	uvoff = stride * dfmt->height;
-	if (w + VP9_PAD > stride || h + VP9_PAD > dfmt->height ||
+	bps = hivdec_decoded_bps(ctx);
+	if (f->bit_depth != (bps == 2 ? 10 : 8) ||
+	    (w + VP9_PAD) * bps > stride || h + VP9_PAD > dfmt->height ||
 	    uvoff * 3 / 2 > vb2_plane_size(&dst->vb2_buf, 0)) {
 		dev_err(vdec->dev, "capture buffer too small for %ux%u\n", w, h);
 		ret = -EINVAL;
@@ -678,44 +689,46 @@ static void vp9_pad_frame(struct hivdec_ctx *ctx, struct vb2_v4l2_buffer *dst, u
 	const struct v4l2_pix_format_mplane *fmt = &ctx->decoded_fmt.fmt.pix_mp;
 	struct sg_table *sgt = vb2_dma_sg_plane_desc(&dst->vb2_buf, 0);
 	u8 *p = vb2_plane_vaddr(&dst->vb2_buf, 0);
+	u32 bps = hivdec_decoded_bps(ctx), pad = VP9_PAD * bps;
 	u32 stride = fmt->plane_fmt[0].bytesperline, uv = stride * fmt->height;
-	u32 cw = 2 * DIV_ROUND_UP(w, 2), ch = DIV_ROUND_UP(h, 2), y;
+	u32 lw = w * bps, cw = 2 * DIV_ROUND_UP(w, 2) * bps, ch = DIV_ROUND_UP(h, 2), y, x;
 	struct vp9_sg_cursor c;
 
-	if (!p || !sgt || w + VP9_PAD > stride || h + VP9_PAD > fmt->height)
+	if (!p || !sgt || lw + pad > stride || h + VP9_PAD > fmt->height)
 		return;
 
 	/* luma: right edge, then the bottom rows */
 	vp9_cursor_init(&c, ctx->dev->dev, sgt);
 	for (y = 0; y < h; y++) {
-		u32 off = y * stride + w - 1;
+		u32 off = y * stride + lw - bps;
 
-		vp9_sync(&c, off, 1, true);
-		memset(p + off + 1, p[off], VP9_PAD);
-		vp9_sync(&c, off + 1, VP9_PAD, false);
+		vp9_sync(&c, off, bps, true);
+		for (x = bps; x <= pad; x += bps)
+			memcpy(p + off + x, p + off, bps);
+		vp9_sync(&c, off + bps, pad, false);
 	}
 	vp9_cursor_init(&c, ctx->dev->dev, sgt);
-	vp9_sync(&c, (h - 1) * stride, w, true);
+	vp9_sync(&c, (h - 1) * stride, lw, true);
 	for (y = h; y < h + VP9_PAD; y++) {
-		memcpy(p + y * stride, p + (h - 1) * stride, w + VP9_PAD);
-		vp9_sync(&c, y * stride, w + VP9_PAD, false);
+		memcpy(p + y * stride, p + (h - 1) * stride, lw + pad);
+		vp9_sync(&c, y * stride, lw + pad, false);
 	}
 
 	/* chroma: interleaved U/V pairs */
 	vp9_cursor_init(&c, ctx->dev->dev, sgt);
 	for (y = 0; y < ch; y++) {
-		u32 off = uv + y * stride + cw - 2, x;
+		u32 off = uv + y * stride + cw - 2 * bps;
 
-		vp9_sync(&c, off, 2, true);
-		for (x = 2; x <= VP9_PAD; x += 2)
-			memcpy(p + off + x, p + off, 2);
-		vp9_sync(&c, off + 2, VP9_PAD, false);
+		vp9_sync(&c, off, 2 * bps, true);
+		for (x = 2 * bps; x <= pad; x += 2 * bps)
+			memcpy(p + off + x, p + off, 2 * bps);
+		vp9_sync(&c, off + 2 * bps, pad, false);
 	}
 	vp9_cursor_init(&c, ctx->dev->dev, sgt);
 	vp9_sync(&c, uv + (ch - 1) * stride, cw, true);
 	for (y = ch; y < ch + VP9_PAD / 2; y++) {
-		memcpy(p + uv + y * stride, p + uv + (ch - 1) * stride, cw + VP9_PAD);
-		vp9_sync(&c, uv + y * stride, cw + VP9_PAD, false);
+		memcpy(p + uv + y * stride, p + uv + (ch - 1) * stride, cw + pad);
+		vp9_sync(&c, uv + y * stride, cw + pad, false);
 	}
 }
 
@@ -751,4 +764,5 @@ const struct hivdec_coded_fmt_ops hivdec_vp9_fmt_ops = {
 	.run = hivdec_vp9_run,
 	.done = hivdec_vp9_done,
 	.try_ctrl = hivdec_vp9_try_ctrl,
+	.bit_depth = hivdec_vp9_bit_depth,
 };

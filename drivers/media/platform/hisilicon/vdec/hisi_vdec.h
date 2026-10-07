@@ -184,6 +184,8 @@ struct hivdec_coded_fmt_ops {
 	 */
 	int (*done)(struct hivdec_ctx *ctx, enum vb2_buffer_state state);
 	int (*try_ctrl)(struct hivdec_ctx *ctx, struct v4l2_ctrl *ctrl);
+	/* bit depth a control asks for (decides NV12 / P010), 0 if unrelated */
+	unsigned int (*bit_depth)(const struct v4l2_ctrl *ctrl);
 	/*
 	 * decode what was gathered for a held CAPTURE buffer before a drain
 	 * releases it: 0 = VDH started, >0 = nothing to do
@@ -267,6 +269,7 @@ struct hivdec_ctx {
 	struct v4l2_ctrl_handler ctrl_hdl;
 	struct hivdec_dev *dev;
 	struct hivdec_aux_buf msg;	/* message pool */
+	unsigned int bit_depth;		/* of the stream, from SPS / frame header */
 	bool job_active;
 	void *priv;			/* codec state */
 };
@@ -274,6 +277,12 @@ struct hivdec_ctx {
 static inline struct hivdec_ctx *file_to_hivdec_ctx(struct file *filp)
 {
 	return container_of(file_to_v4l2_fh(filp), struct hivdec_ctx, fh);
+}
+
+/* bytes per sample of the decoded frames: 2 for P010 (10-bit) */
+static inline unsigned int hivdec_decoded_bps(const struct hivdec_ctx *ctx)
+{
+	return ctx->decoded_fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_P010 ? 2 : 1;
 }
 
 static inline u32 vdh_read(struct hivdec_dev *vdec, u32 reg)
