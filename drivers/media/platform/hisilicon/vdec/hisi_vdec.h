@@ -201,6 +201,7 @@ struct hivdec_coded_fmt_desc {
 	unsigned int num_decoded_fmts;
 	u32 subsystem_flags;
 	u32 height_align;	/* of decoded frames (macroblock pairs / CTBs) */
+	u32 pad;		/* extra columns and rows kept around decoded frames */
 };
 
 /* per capture buffer: decoder-private data kept with the decoded frame */
@@ -317,5 +318,6 @@ void *hivdec_find_control_data(struct hivdec_ctx *ctx, u32 id);
 
 extern const struct hivdec_coded_fmt_ops hivdec_h264_fmt_ops;
 extern const struct hivdec_coded_fmt_ops hivdec_hevc_fmt_ops;
+extern const struct hivdec_coded_fmt_ops hivdec_vp9_fmt_ops;
 
 #endif /* HISI_VDEC_H_ */

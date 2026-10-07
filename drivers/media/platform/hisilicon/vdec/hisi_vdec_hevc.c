@@ -16,6 +16,7 @@
 #include "hisi_vdec_tables.h"
 
 #define HEVC_MAX_SLICES		(HIVDEC_MAX_SLICES - 2)
+
 #define HEVC_APC_SLOTS		16
 #define HEVC_STREAM_SIZE_MIN	SZ_8M
 
@@ -44,6 +45,7 @@ struct hivdec_hevc_ctx {
 	u32 dblk_left, dblk_top, sao_left, sao_top, head;	/* IOVAs */
 	u32 *tile_cpu;
 	struct hivdec_hevc_slice slices[HEVC_MAX_SLICES];
+	u32 sc[HEVC_MAX_SLICES + 1];		/* start code positions in the OUTPUT buffer */
 	struct hivdec_hevc_buf_meta meta[VB2_MAX_FRAME];
 	s8 apc[HEVC_APC_SLOTS];
 	u16 *rs2ts, *ts2rs;
@@ -174,14 +176,18 @@ static u32 hevc_nal_to_rbsp(u8 *dst, const u8 *src, u32 len, u32 raw_limit, u32 
 	return n;
 }
 
-/* bits of slice_segment_data(): up to (excluding) rbsp_stop_one_bit */
+/*
+ * bits of slice_segment_data() including rbsp_stop_one_bit: the VDH does not
+ * read past this length, and its CABAC engine needs the stop bit to decode
+ * the final bins of the last CTB.
+ */
 static u32 hevc_payload_bits(const u8 *p, u32 len)
 {
 	while (len && !p[len - 1])
 		len--;
 	if (!len)
 		return 0;
-	return len * 8 - __builtin_ctz(p[len - 1]) - 1;
+	return len * 8 - __builtin_ctz(p[len - 1]);
 }
 
 static int hevc_find_buf(struct hivdec_ctx *ctx, u64 ts)
@@ -481,12 +487,10 @@ static void hevc_slice_msg(struct hivdec_ctx *ctx, const struct hevc_pic *pic,
 			for (i = 0; i < n; i++) {
 				s32 cw[2], cof[2];
 
+				/* chroma_offset_lX is the final ChromaOffsetLX (7-56) */
 				for (c = 0; c < 2; c++) {
-					s32 o;
-
 					cw[c] = (1 << cd) + dc[i][c];
-					o = 128 + co[i][c] - ((128 * cw[c]) >> cd);
-					cof[c] = clamp(o, -128, 127);
+					cof[c] = co[i][c];
 				}
 				msg[64 + 16 * L + i] = (ld & 7) |
 					(((1 << ld) + dl[i]) & 0x1ff) << 3 | (u32)(u8)lo[i] << 12;
@@ -516,7 +520,8 @@ static int hivdec_hevc_run(struct hivdec_ctx *ctx)
 	const u8 *data = vb2_plane_vaddr(&src->vb2_buf, 0);
 	u32 size = vb2_get_plane_payload(&src->vb2_buf, 0);
 	u32 *msg, *head, i, k, n, used = 0, ystride, cfg0, cfg1, mvsize;
-	u32 log2_min_cb, log2_min_tb, max_cu_depth, slot;
+	u32 log2_min_cb, log2_min_tb, max_cu_depth, slot, nsc;
+	bool abs_off;
 	int ret = 0;
 
 	if (req)
@@ -567,35 +572,58 @@ static int hivdec_hevc_run(struct hivdec_ctx *ctx)
 	pic.mv = dbuf->mv.map.iova;
 
 	/*
-	 * slices: data_byte_offset is the offset of slice_segment_data() in
-	 * the OUTPUT buffer (past start code and header); the data runs to the
-	 * next start code. Copied as RBSP.
+	 * slices: data_byte_offset locates slice_segment_data() in RBSP terms
+	 * (emulation prevention bytes of the header not counted). GStreamer
+	 * counts it from the slice's own start code, libva-v4l2-request from
+	 * the start of the OUTPUT buffer; the latter is recognised by every
+	 * offset falling inside its own slice. Each slice NAL is copied as
+	 * RBSP (the VDH does not drop emulation prevention bytes).
 	 */
+	nsc = 0;
+	for (i = 0; i + 2 < size && nsc < ARRAY_SIZE(h->sc); i++) {
+		if (!data[i] && !data[i + 1] && data[i + 2] == 1) {
+			h->sc[nsc++] = i;
+			i += 2;
+		}
+	}
+	if (nsc < n) {
+		ret = -EINVAL;
+		goto out;
+	}
+	abs_off = true;
+	for (k = 0; k < n && abs_off; k++) {
+		u32 hi = k + 1 < nsc ? h->sc[k + 1] : size;
+
+		if (sps_arr[k].data_byte_offset <= h->sc[k] + 3 ||
+		    sps_arr[k].data_byte_offset >= hi)
+			abs_off = false;
+	}
 	for (k = 0; k < n; k++) {
 		const struct v4l2_ctrl_hevc_slice_params *sp = &sps_arr[k];
-		u32 start = sp->data_byte_offset, end = start, rbsp, dummy;
+		u32 nal = h->sc[k] + 3, end = k + 1 < nsc ? h->sc[k + 1] : size;
+		u32 roff = abs_off ? sp->data_byte_offset - nal : sp->data_byte_offset - 3;
+		u32 rbsp, dummy;
 
-		if (start >= size) {
+		if (!abs_off && sp->data_byte_offset < 3) {
 			ret = -EINVAL;
 			goto out;
 		}
-		while (end + 2 < size && !(data[end] == 0 && data[end + 1] == 0 &&
-					   (data[end + 2] == 1 ||
-					    (data[end + 2] == 0 && end + 3 < size && data[end + 3] == 1))))
-			end++;
-		if (end + 2 >= size)
-			end = size;
-		if (used + (end - start) + 64 > h->stream.size) {
+		if (used + (end - nal) + 64 > h->stream.size) {
 			ret = -ENOSPC;
 			goto out;
 		}
 		h->slices[k].offset = used;
-		rbsp = hevc_nal_to_rbsp(h->stream.cpu + used, data + start, end - start, 0, &dummy);
-		h->slices[k].data_byte = 0;
-		h->slices[k].bits = hevc_payload_bits(h->stream.cpu + used, rbsp);
+		rbsp = hevc_nal_to_rbsp(h->stream.cpu + used, data + nal, end - nal, 0, &dummy);
+		if (roff >= rbsp) {
+			ret = -EINVAL;
+			goto out;
+		}
+		h->slices[k].data_byte = roff;
+		h->slices[k].bits = hevc_payload_bits(h->stream.cpu + used + roff, rbsp - roff);
 		if (vdec->debug > 1)
-			dev_info(vdec->dev, "  slice %u: data %u..%u rbsp %u bits %u addr %u\n",
-				 k, start, end, rbsp, h->slices[k].bits, sp->slice_segment_addr);
+			dev_info(vdec->dev, "  slice %u: nal %u..%u rbsp %u data %u bits %u addr %u%s\n",
+				 k, nal, end, rbsp, roff, h->slices[k].bits,
+				 sp->slice_segment_addr, abs_off ? "" : " (rel)");
 		memset(h->stream.cpu + used + rbsp, 0, 32);
 		used = ALIGN(used + rbsp + 32, 64);
 	}

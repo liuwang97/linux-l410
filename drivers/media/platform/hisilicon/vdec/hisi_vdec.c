@@ -97,6 +97,17 @@ static const struct hivdec_ctrl_desc hivdec_hevc_ctrls[] = {
 	},
 };
 
+static const struct hivdec_ctrl_desc hivdec_vp9_ctrls[] = {
+	{ .cfg.id = V4L2_CID_STATELESS_VP9_FRAME },
+	{ .cfg.id = V4L2_CID_STATELESS_VP9_COMPRESSED_HDR },
+	{
+		.cfg.id = V4L2_CID_MPEG_VIDEO_VP9_PROFILE,
+		.cfg.min = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+		.cfg.max = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+		.cfg.def = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+	},
+};
+
 static const struct hivdec_coded_fmt_desc hivdec_coded_fmts[] = {
 	{
 		.fourcc = V4L2_PIX_FMT_H264_SLICE,
@@ -133,6 +144,24 @@ static const struct hivdec_coded_fmt_desc hivdec_coded_fmts[] = {
 		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_fmts),
 		.height_align = 64,
 	},
+	{
+		.fourcc = V4L2_PIX_FMT_VP9_FRAME,
+		.frmsize = {
+			.min_width = 64,
+			.max_width = 4096,
+			.step_width = 8,
+			.min_height = 64,
+			.max_height = 2304,
+			.step_height = 8,
+		},
+		.ctrls = hivdec_vp9_ctrls,
+		.num_ctrls = ARRAY_SIZE(hivdec_vp9_ctrls),
+		.ops = &hivdec_vp9_fmt_ops,
+		.decoded_fmts = hivdec_yuv420_fmts,
+		.num_decoded_fmts = ARRAY_SIZE(hivdec_yuv420_fmts),
+		.height_align = 64,
+		.pad = 16,
+	},
 };
 
 static const struct hivdec_coded_fmt_desc *hivdec_find_coded_fmt_desc(u32 fourcc)
@@ -153,9 +182,10 @@ static const struct hivdec_coded_fmt_desc *hivdec_find_coded_fmt_desc(u32 fourcc
 static void hivdec_fill_decoded_pixfmt(struct hivdec_ctx *ctx,
 				       struct v4l2_pix_format_mplane *pix_mp)
 {
+	u32 pad = ctx->coded_fmt_desc->pad;
 	u32 w = ALIGN(pix_mp->width, 16);
-	u32 h = ALIGN(pix_mp->height, ctx->coded_fmt_desc->height_align);
-	u32 stride = ALIGN(w, 64);
+	u32 h = ALIGN(pix_mp->height + pad, ctx->coded_fmt_desc->height_align);
+	u32 stride = ALIGN(w + pad, 64);
 
 	pix_mp->width = w;
 	pix_mp->height = h;
