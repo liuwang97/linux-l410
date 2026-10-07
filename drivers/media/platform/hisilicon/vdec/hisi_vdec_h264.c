@@ -132,17 +132,27 @@ static s32 h264_bits_se(struct h264_bits *b)
 	return v & 1 ? (s32)((v + 1) >> 1) : -(s32)(v >> 1);
 }
 
+/* ref_pic_list_modification() of one list */
+struct h264_rplm {
+	u8 n;
+	u8 idc[V4L2_H264_REF_LIST_LEN];
+	u32 val[V4L2_H264_REF_LIST_LEN];
+};
+
 /*
  * Walk the slice header (7.3.3) and return the bit position of slice_data()
- * in the RBSP, counted from the NAL header byte.
+ * in the RBSP, counted from the NAL header byte. In frame-based mode the
+ * header fields also go to @out, @pw and @mod (the list modifications).
  */
-static int h264_slice_data_bits(const struct hivdec_h264_ctx *h, const u8 *nal, u32 len,
-				const struct v4l2_ctrl_h264_slice_params *sp, u32 *bits)
+static int h264_slice_header(const struct hivdec_h264_ctx *h, const u8 *nal, u32 len,
+			     u32 *bits, struct v4l2_ctrl_h264_slice_params *out,
+			     struct v4l2_ctrl_h264_pred_weights *pw, struct h264_rplm *mod)
 {
 	const struct v4l2_ctrl_h264_sps *sps = &h->sps;
 	const struct v4l2_ctrl_h264_pps *pps = &h->pps;
 	struct h264_bits b;
-	u32 nal_ref_idc, nal_type, type, i, l, n[2];
+	u32 nal_ref_idc, nal_type, type, i, l, n[2], first_mb, v;
+	s32 sv;
 	bool field = false, chroma = sps->chroma_format_idc != 0;
 
 	if (len < 2)
@@ -153,11 +163,16 @@ static int h264_slice_data_bits(const struct hivdec_h264_ctx *h, const u8 *nal, 
 		return -EINVAL;
 	h264_bits_init(&b, nal, len);
 	h264_bits_u(&b, 8);				/* NAL header */
-	h264_bits_ue(&b);				/* first_mb_in_slice */
+	first_mb = h264_bits_ue(&b);			/* first_mb_in_slice */
 	type = h264_bits_ue(&b) % 5;			/* slice_type */
 	h264_bits_ue(&b);				/* pic_parameter_set_id */
 	if (sps->flags & V4L2_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE)
 		h264_bits_u(&b, 2);
+	if (out) {
+		memset(out, 0, sizeof(*out));
+		out->first_mb_in_slice = first_mb;
+		out->slice_type = type;
+	}
 	h264_bits_u(&b, sps->log2_max_frame_num_minus4 + 4);	/* frame_num */
 	if (!(sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY)) {
 		field = h264_bits_u(&b, 1);
@@ -176,10 +191,14 @@ static int h264_slice_data_bits(const struct hivdec_h264_ctx *h, const u8 *nal, 
 		if ((pps->flags & V4L2_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT) && !field)
 			h264_bits_se(&b);
 	}
-	if (pps->flags & V4L2_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT)
-		h264_bits_ue(&b);
-	if (type == V4L2_H264_SLICE_TYPE_B)
-		h264_bits_u(&b, 1);			/* direct_spatial_mv_pred_flag */
+	if (pps->flags & V4L2_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT) {
+		v = h264_bits_ue(&b);
+		if (out)
+			out->redundant_pic_cnt = v;
+	}
+	if (type == V4L2_H264_SLICE_TYPE_B &&
+	    h264_bits_u(&b, 1) && out)		/* direct_spatial_mv_pred_flag */
+		out->flags |= V4L2_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED;
 	n[0] = pps->num_ref_idx_l0_default_active_minus1 + 1;
 	n[1] = pps->num_ref_idx_l1_default_active_minus1 + 1;
 	if (type == V4L2_H264_SLICE_TYPE_P || type == V4L2_H264_SLICE_TYPE_SP ||
@@ -190,6 +209,14 @@ static int h264_slice_data_bits(const struct hivdec_h264_ctx *h, const u8 *nal, 
 				n[1] = h264_bits_ue(&b) + 1;
 		}
 	}
+	if (n[0] > V4L2_H264_REF_LIST_LEN || n[1] > V4L2_H264_REF_LIST_LEN)
+		return -EINVAL;
+	if (out) {
+		out->num_ref_idx_l0_active_minus1 = n[0] - 1;
+		out->num_ref_idx_l1_active_minus1 = n[1] - 1;
+	}
+	if (mod)
+		mod[0].n = mod[1].n = 0;
 	/* ref_pic_list_modification() */
 	for (l = 0; l < 2; l++) {
 		if (l == 0 && (type == V4L2_H264_SLICE_TYPE_I || type == V4L2_H264_SLICE_TYPE_SI))
@@ -201,8 +228,13 @@ static int h264_slice_data_bits(const struct hivdec_h264_ctx *h, const u8 *nal, 
 
 			do {
 				idc = h264_bits_ue(&b);
-				if (idc <= 2)
-					h264_bits_ue(&b);
+				v = idc <= 2 ? h264_bits_ue(&b) : 0;
+				if (idc <= 2 && mod) {
+					if (mod[l].n == V4L2_H264_REF_LIST_LEN)
+						return -EINVAL;
+					mod[l].idc[mod[l].n] = idc;
+					mod[l].val[mod[l].n++] = v;
+				}
 			} while (idc != 3 && !b.error);
 		}
 	}
@@ -210,20 +242,35 @@ static int h264_slice_data_bits(const struct hivdec_h264_ctx *h, const u8 *nal, 
 	if (((pps->flags & V4L2_H264_PPS_FLAG_WEIGHTED_PRED) &&
 	     (type == V4L2_H264_SLICE_TYPE_P || type == V4L2_H264_SLICE_TYPE_SP)) ||
 	    (pps->weighted_bipred_idc == 1 && type == V4L2_H264_SLICE_TYPE_B)) {
-		h264_bits_ue(&b);
-		if (chroma)
-			h264_bits_ue(&b);
+		u32 ld = h264_bits_ue(&b), cd = chroma ? h264_bits_ue(&b) : 0;
+
+		if (pw) {
+			memset(pw, 0, sizeof(*pw));
+			pw->luma_log2_weight_denom = ld;
+			pw->chroma_log2_weight_denom = cd;
+		}
 		for (l = 0; l < (type == V4L2_H264_SLICE_TYPE_B ? 2U : 1U); l++)
 			for (i = 0; i < n[l] && !b.error; i++) {
+				struct v4l2_h264_weight_factors *w = pw ? &pw->weight_factors[l] : NULL;
+				s32 lw = 1 << ld, lo = 0, cw[2] = { 1 << cd, 1 << cd }, co[2] = { };
+
 				if (h264_bits_u(&b, 1)) {
-					h264_bits_se(&b);
-					h264_bits_se(&b);
+					lw = h264_bits_se(&b);
+					lo = h264_bits_se(&b);
 				}
 				if (chroma && h264_bits_u(&b, 1)) {
-					h264_bits_se(&b);
-					h264_bits_se(&b);
-					h264_bits_se(&b);
-					h264_bits_se(&b);
+					cw[0] = h264_bits_se(&b);
+					co[0] = h264_bits_se(&b);
+					cw[1] = h264_bits_se(&b);
+					co[1] = h264_bits_se(&b);
+				}
+				if (w) {
+					w->luma_weight[i] = lw;
+					w->luma_offset[i] = lo;
+					w->chroma_weight[i][0] = cw[0];
+					w->chroma_offset[i][0] = co[0];
+					w->chroma_weight[i][1] = cw[1];
+					w->chroma_offset[i][1] = co[1];
 				}
 			}
 	}
@@ -244,18 +291,32 @@ static int h264_slice_data_bits(const struct hivdec_h264_ctx *h, const u8 *nal, 
 		}
 	}
 	if ((pps->flags & V4L2_H264_PPS_FLAG_ENTROPY_CODING_MODE) &&
-	    type != V4L2_H264_SLICE_TYPE_I && type != V4L2_H264_SLICE_TYPE_SI)
-		h264_bits_ue(&b);			/* cabac_init_idc */
-	h264_bits_se(&b);				/* slice_qp_delta */
+	    type != V4L2_H264_SLICE_TYPE_I && type != V4L2_H264_SLICE_TYPE_SI) {
+		v = h264_bits_ue(&b);			/* cabac_init_idc */
+		if (out)
+			out->cabac_init_idc = v;
+	}
+	sv = h264_bits_se(&b);				/* slice_qp_delta */
+	if (out)
+		out->slice_qp_delta = sv;
 	if (type == V4L2_H264_SLICE_TYPE_SP || type == V4L2_H264_SLICE_TYPE_SI) {
-		if (type == V4L2_H264_SLICE_TYPE_SP)
-			h264_bits_u(&b, 1);
-		h264_bits_se(&b);
+		if (type == V4L2_H264_SLICE_TYPE_SP && h264_bits_u(&b, 1) && out)
+			out->flags |= V4L2_H264_SLICE_FLAG_SP_FOR_SWITCH;
+		sv = h264_bits_se(&b);			/* slice_qs_delta */
+		if (out)
+			out->slice_qs_delta = sv;
 	}
 	if (pps->flags & V4L2_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT) {
-		if (h264_bits_ue(&b) != 1) {
-			h264_bits_se(&b);
-			h264_bits_se(&b);
+		v = h264_bits_ue(&b);			/* disable_deblocking_filter_idc */
+		if (out)
+			out->disable_deblocking_filter_idc = v;
+		if (v != 1) {
+			sv = h264_bits_se(&b);
+			if (out)
+				out->slice_alpha_c0_offset_div2 = sv;
+			sv = h264_bits_se(&b);
+			if (out)
+				out->slice_beta_offset_div2 = sv;
 		}
 	}
 	if (pps->num_slice_groups_minus1)
@@ -263,10 +324,129 @@ static int h264_slice_data_bits(const struct hivdec_h264_ctx *h, const u8 *nal, 
 	if (b.error)
 		return -EINVAL;
 	*bits = b.pos;
+	if (out)
+		out->header_bit_size = b.pos;
 	/* CABAC: slice_data() starts byte aligned (cabac_alignment_one_bit) */
 	if (pps->flags & V4L2_H264_PPS_FLAG_ENTROPY_CODING_MODE)
 		*bits = ALIGN(*bits, 8);
 	return 0;
+}
+
+/* ---------------------------------------------------------------- frame-based mode */
+
+/*
+ * PicNum / LongTermPicNum (8.2.4.1) of a reference list entry; long-term
+ * entries never match a short-term number and vice versa.
+ */
+static s32 h264_ref_picnum(const struct v4l2_h264_reflist_builder *b,
+			   const struct v4l2_h264_reference *r, bool field, u8 cur_fields,
+			   bool long_term)
+{
+	s32 fn = b->refs[r->index].frame_num;
+
+	if (!!b->refs[r->index].longterm != long_term)
+		return S32_MIN;
+	if (!field)
+		return fn;
+	return 2 * fn + (r->fields == cur_fields);
+}
+
+/* ref_pic_list_modification process (8.2.4.3) on @list of @n entries */
+static void h264_modify_list(const struct hivdec_h264_ctx *h,
+			     const struct v4l2_h264_reflist_builder *b,
+			     struct v4l2_h264_reference *list, unsigned int n,
+			     const struct h264_rplm *mod)
+{
+	bool field = h->dp.flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC;
+	u8 cur_fields = !field ? V4L2_H264_FRAME_REF :
+			(h->dp.flags & V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD) ?
+			V4L2_H264_BOTTOM_FIELD_REF : V4L2_H264_TOP_FIELD_REF;
+	s32 max_pic = (1 << (h->sps.log2_max_frame_num_minus4 + 4)) * (field ? 2 : 1);
+	s32 cur_pic = field ? 2 * h->dp.frame_num + 1 : h->dp.frame_num;
+	s32 pred = cur_pic;
+	struct v4l2_h264_reference tmp[V4L2_H264_REF_LIST_LEN + 1];
+	unsigned int i, k, ref_idx = 0;
+
+	memcpy(tmp, list, n * sizeof(*list));
+	for (i = 0; i < mod->n && ref_idx < n; i++) {
+		bool lt = mod->idc[i] == 2;
+		struct v4l2_h264_reference pic = { };
+		s32 num;
+		unsigned int c, nidx;
+		bool found = false;
+
+		if (lt) {
+			num = mod->val[i];
+		} else {
+			s32 d = mod->val[i] + 1;
+
+			pred = mod->idc[i] == 0 ? pred - d : pred + d;
+			if (pred < 0)
+				pred += max_pic;
+			else if (pred >= max_pic)
+				pred -= max_pic;
+			num = pred > cur_pic ? pred - max_pic : pred;
+		}
+		for (k = 0; k < b->num_valid && !found; k++) {
+			const struct v4l2_h264_reference *r = &b->unordered_reflist[k];
+
+			if (field) {
+				/* either field of a reference frame */
+				u8 f;
+
+				for (f = V4L2_H264_TOP_FIELD_REF; f <= V4L2_H264_BOTTOM_FIELD_REF; f++) {
+					struct v4l2_h264_reference fr = { .fields = f, .index = r->index };
+
+					if (!(h->dp.dpb[r->index].fields & f))
+						continue;
+					if (h264_ref_picnum(b, &fr, true, cur_fields, lt) == num) {
+						pic = fr;
+						found = true;
+						break;
+					}
+				}
+			} else if (h264_ref_picnum(b, r, false, cur_fields, lt) == num) {
+				pic = *r;
+				pic.fields = V4L2_H264_FRAME_REF;
+				found = true;
+			}
+		}
+		if (!found)
+			continue;
+		for (c = n; c > ref_idx; c--)
+			tmp[c] = tmp[c - 1];
+		tmp[ref_idx++] = pic;
+		nidx = ref_idx;
+		for (c = ref_idx; c <= n; c++)
+			if (tmp[c].index != pic.index || tmp[c].fields != pic.fields)
+				tmp[nidx++] = tmp[c];
+	}
+	memcpy(list, tmp, n * sizeof(*list));
+}
+
+/* RefPicList0/1 of a slice (8.2.4) from the DPB and the parsed modifications */
+static void h264_frame_slice_lists(const struct hivdec_h264_ctx *h,
+				   struct v4l2_ctrl_h264_slice_params *sp,
+				   const struct h264_rplm *mod)
+{
+	struct v4l2_h264_reflist_builder b;
+	struct v4l2_h264_reference l0[V4L2_H264_REF_LIST_LEN], l1[V4L2_H264_REF_LIST_LEN];
+	unsigned int n0 = sp->num_ref_idx_l0_active_minus1 + 1;
+	unsigned int n1 = sp->num_ref_idx_l1_active_minus1 + 1;
+
+	memset(l0, 0, sizeof(l0));
+	memset(l1, 0, sizeof(l1));
+	v4l2_h264_init_reflist_builder(&b, &h->dp, &h->sps, h->dp.dpb);
+	if (sp->slice_type == V4L2_H264_SLICE_TYPE_P || sp->slice_type == V4L2_H264_SLICE_TYPE_SP) {
+		v4l2_h264_build_p_ref_list(&b, l0);
+		h264_modify_list(h, &b, l0, n0, &mod[0]);
+	} else if (sp->slice_type == V4L2_H264_SLICE_TYPE_B) {
+		v4l2_h264_build_b_ref_lists(&b, l0, l1);
+		h264_modify_list(h, &b, l0, n0, &mod[0]);
+		h264_modify_list(h, &b, l1, n1, &mod[1]);
+	}
+	memcpy(sp->ref_pic_list0, l0, sizeof(sp->ref_pic_list0));
+	memcpy(sp->ref_pic_list1, l1, sizeof(sp->ref_pic_list1));
 }
 
 /* bits up to and including the rbsp_stop_one_bit, trailing zero bytes excluded */
@@ -418,19 +598,57 @@ static u32 hivdec_nal_to_rbsp(u8 *dst, const u8 *src, u32 len)
 	return n;
 }
 
-static int hivdec_h264_gather(struct hivdec_ctx *ctx, struct vb2_v4l2_buffer *src)
+/* copy one slice NAL (without start code) and parse its header */
+static int hivdec_h264_gather_nal(struct hivdec_ctx *ctx, const u8 *data, u32 len,
+				  const struct v4l2_ctrl_h264_slice_params *sp,
+				  const struct v4l2_ctrl_h264_pred_weights *pw)
 {
 	struct hivdec_h264_ctx *h = ctx->priv;
 	struct hivdec_h264_slice *s;
-	const struct v4l2_ctrl_h264_pred_weights *pw;
+	struct h264_rplm mod[2];
+	int ret;
+
+	if (h->nslices >= H264_MAX_SLICES)
+		return -ENOSPC;
+	if (h->stream_used + len + 64 > h->stream.size)
+		return -ENOSPC;
+
+	s = &h->slices[h->nslices];
+	if (sp)
+		s->sp = *sp;
+	if (pw)
+		s->pw = *pw;
+	/* the VDH reads RBSP: drop emulation prevention bytes while copying */
+	s->offset = h->stream_used;
+	s->size = hivdec_nal_to_rbsp(h->stream.cpu + s->offset, data, len);
+	len = s->size;
+	ret = h264_slice_header(h, h->stream.cpu + s->offset, len, &s->data_bits,
+				sp ? NULL : &s->sp, sp ? NULL : &s->pw, sp ? NULL : mod);
+	if (ret) {
+		if (ctx->dev->debug)
+			dev_info(ctx->dev->dev, "slice %u: header parse %d\n", h->nslices, ret);
+		return ret;
+	}
+	if (!sp)
+		h264_frame_slice_lists(h, &s->sp, mod);
+	/* zero padding keeps the entropy decoder's prefetch inside the buffer */
+	memset(h->stream.cpu + s->offset + len, 0, 32);
+	h->stream_used = ALIGN(s->offset + len + 32, 64);
+	h->nslices++;
+	return 0;
+}
+
+static int hivdec_h264_gather(struct hivdec_ctx *ctx, struct vb2_v4l2_buffer *src)
+{
+	struct hivdec_h264_ctx *h = ctx->priv;
 	const u8 *data = vb2_plane_vaddr(&src->vb2_buf, 0);
 	u32 len = vb2_get_plane_payload(&src->vb2_buf, 0);
+	const s32 *mode = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_H264_DECODE_MODE);
+	u32 i, start, nal_len;
 	int ret;
 
 	if (!data)
 		return -EFAULT;
-	if (h->nslices >= H264_MAX_SLICES)
-		return -ENOSPC;
 
 	if (!h->nslices) {
 		const void *sm = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_H264_SCALING_MATRIX);
@@ -447,32 +665,33 @@ static int hivdec_h264_gather(struct hivdec_ctx *ctx, struct vb2_v4l2_buffer *sr
 		h->stream_used = 0;
 	}
 
-	data = hivdec_h264_skip_start_code(data, &len);
-	if (h->stream_used + len + 64 > h->stream.size)
-		return -ENOSPC;
-
-	s = &h->slices[h->nslices];
-	s->sp = *(struct v4l2_ctrl_h264_slice_params *)
-		hivdec_find_control_data(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS);
-	pw = hivdec_find_control_data(ctx, V4L2_CID_STATELESS_H264_PRED_WEIGHTS);
-	if (pw)
-		s->pw = *pw;
-	/* the VDH reads RBSP: drop emulation prevention bytes while copying */
-	s->offset = h->stream_used;
-	s->size = hivdec_nal_to_rbsp(h->stream.cpu + s->offset, data, len);
-	len = s->size;
-	ret = h264_slice_data_bits(h, h->stream.cpu + s->offset, len, &s->sp,
-				   &s->data_bits);
-	if (ret) {
-		if (ctx->dev->debug)
-			dev_info(ctx->dev->dev, "slice %u: header parse %d\n", h->nslices, ret);
-		return ret;
+	if (!mode || *mode != V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED) {
+		data = hivdec_h264_skip_start_code(data, &len);
+		return hivdec_h264_gather_nal(ctx, data, len,
+			hivdec_find_control_data(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS),
+			hivdec_find_control_data(ctx, V4L2_CID_STATELESS_H264_PRED_WEIGHTS));
 	}
-	/* zero padding keeps the entropy decoder's prefetch inside the buffer */
-	memset(h->stream.cpu + s->offset + len, 0, 32);
-	h->stream_used = ALIGN(s->offset + len + 32, 64);
-	h->nslices++;
-	return 0;
+
+	/*
+	 * Frame-based: every NAL of the picture with Annex B start codes and
+	 * no slice parameters; parse the slice headers here.
+	 */
+	for (i = 0, start = 0; i + 2 < len; i++) {
+		if (data[i] || data[i + 1] || data[i + 2] != 1)
+			continue;
+		start = i + 3;
+		for (i = start; i + 2 < len; i++)
+			if (!data[i] && !data[i + 1] && (data[i + 2] == 1 || !data[i + 2]))
+				break;
+		nal_len = (i + 2 < len ? i : len) - start;
+		if (nal_len && ((data[start] & 0x1f) == 1 || (data[start] & 0x1f) == 5)) {
+			ret = hivdec_h264_gather_nal(ctx, data + start, nal_len, NULL, NULL);
+			if (ret)
+				return ret;
+		}
+		i--;
+	}
+	return h->nslices ? 0 : -EINVAL;
 }
 
 /* ---------------------------------------------------------------- references */

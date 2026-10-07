@@ -3,7 +3,8 @@
  * HiSilicon Kirin 990 video decoder: HEVC
  *
  * Frame-based decoding: a request carries all slice segments of a picture
- * (Annex B) and the array of their slice parameters. The slices are copied
+ * (Annex B) and the array of their slice parameters; without the array
+ * (Chromium) the driver parses the slice segment headers itself. The slices are copied
  * as RBSP into a stream buffer (the VDH does not skip emulation prevention
  * bytes) and decoded in one VDH run. Message layout of the HiSilicon VFMW
  * HEVC HAL (VDH V5R6C1/V500R003).
@@ -46,6 +47,7 @@ struct hivdec_hevc_ctx {
 	u32 *tile_cpu;
 	struct hivdec_hevc_slice slices[HEVC_MAX_SLICES];
 	u32 sc[HEVC_MAX_SLICES + 1];		/* start code positions in the OUTPUT buffer */
+	struct v4l2_ctrl_hevc_slice_params *fsp;	/* parsed when userspace gives none */
 	struct hivdec_hevc_buf_meta meta[VB2_MAX_FRAME];
 	s8 apc[HEVC_APC_SLOTS];
 	u16 *rs2ts, *ts2rs;
@@ -65,6 +67,11 @@ static int hivdec_hevc_start(struct hivdec_ctx *ctx)
 	h = kzalloc(sizeof(*h), GFP_KERNEL);
 	if (!h)
 		return -ENOMEM;
+	h->fsp = kvcalloc(HEVC_MAX_SLICES, sizeof(*h->fsp), GFP_KERNEL);
+	if (!h->fsp) {
+		kfree(h);
+		return -ENOMEM;
+	}
 	ret = hivdec_aux_alloc(vdec, &h->stream,
 			       max_t(u32, HEVC_STREAM_SIZE_MIN,
 				     ctx->coded_fmt.fmt.pix_mp.plane_fmt[0].sizeimage + SZ_1M));
@@ -110,6 +117,7 @@ static int hivdec_hevc_start(struct hivdec_ctx *ctx)
 err_stream:
 	hivdec_aux_free(vdec, &h->stream);
 err_free:
+	kvfree(h->fsp);
 	kfree(h);
 	return ret;
 }
@@ -124,6 +132,7 @@ static void hivdec_hevc_stop(struct hivdec_ctx *ctx)
 	hivdec_aux_free(ctx->dev, &h->stream);
 	kvfree(h->rs2ts);
 	kvfree(h->ts2rs);
+	kvfree(h->fsp);
 	kfree(h);
 	ctx->priv = NULL;
 }
@@ -377,6 +386,385 @@ static int hevc_setup_tiles(struct hivdec_hevc_ctx *h, const struct v4l2_ctrl_he
 	return 0;
 }
 
+/* ---------------------------------------------------------------- slice headers */
+
+/* bit reader over the RBSP */
+struct hevc_bits {
+	const u8 *p;
+	u32 len, pos;
+	bool error;
+};
+
+static u32 hevc_u(struct hevc_bits *b, unsigned int n)
+{
+	u32 v = 0;
+
+	while (n--) {
+		if ((b->pos >> 3) >= b->len) {
+			b->error = true;
+			return 0;
+		}
+		v = v << 1 | ((b->p[b->pos >> 3] >> (7 - (b->pos & 7))) & 1);
+		b->pos++;
+	}
+	return v;
+}
+
+static u32 hevc_ue(struct hevc_bits *b)
+{
+	unsigned int lz = 0;
+
+	while (!hevc_u(b, 1) && !b->error)
+		if (++lz > 31) {
+			b->error = true;
+			return 0;
+		}
+	return (1U << lz) - 1 + hevc_u(b, lz);
+}
+
+static s32 hevc_se(struct hevc_bits *b)
+{
+	u32 v = hevc_ue(b);
+
+	return v & 1 ? (s32)((v + 1) >> 1) : -(s32)(v >> 1);
+}
+
+static unsigned int hevc_ceil_log2(u32 v)
+{
+	return v > 1 ? fls(v - 1) : 0;
+}
+
+/* st_ref_pic_set(num_short_term_ref_pic_sets) of a slice header (7.3.7) */
+static void hevc_skip_st_rps(struct hevc_bits *b, const struct v4l2_ctrl_hevc_sps *sps,
+			     const struct v4l2_ctrl_hevc_decode_params *dp)
+{
+	u32 i, n;
+
+	if (sps->num_short_term_ref_pic_sets && hevc_u(b, 1)) {
+		/* inter_ref_pic_set_prediction_flag */
+		hevc_ue(b);			/* delta_idx_minus1 */
+		hevc_u(b, 1);			/* delta_rps_sign */
+		hevc_ue(b);			/* abs_delta_rps_minus1 */
+		for (i = 0; i <= dp->num_delta_pocs_of_ref_rps_idx && !b->error; i++)
+			if (!hevc_u(b, 1))	/* used_by_curr_pic_flag */
+				hevc_u(b, 1);	/* use_delta_flag */
+		return;
+	}
+	n = hevc_ue(b);				/* num_negative_pics */
+	n += hevc_ue(b);			/* num_positive_pics */
+	for (i = 0; i < n && !b->error; i++) {
+		hevc_ue(b);			/* delta_poc_sX_minus1 */
+		hevc_u(b, 1);			/* used_by_curr_pic_sX_flag */
+	}
+}
+
+/* pred_weight_table() (7.3.6.3) into the V4L2 layout (final chroma offsets) */
+static void hevc_parse_pwt(struct hevc_bits *b, const struct v4l2_ctrl_hevc_sps *sps,
+			   struct v4l2_ctrl_hevc_slice_params *sp)
+{
+	struct v4l2_hevc_pred_weight_table *w = &sp->pred_weight_table;
+	bool chroma = sps->chroma_format_idc != 0;
+	unsigned int l, i, j, n[2];
+	u32 lf, cf;
+
+	n[0] = sp->num_ref_idx_l0_active_minus1 + 1;
+	n[1] = sp->slice_type == 0 ? sp->num_ref_idx_l1_active_minus1 + 1 : 0;
+	w->luma_log2_weight_denom = hevc_ue(b);
+	if (chroma)
+		w->delta_chroma_log2_weight_denom = hevc_se(b);
+	for (l = 0; l < 2; l++) {
+		s8 *dl = l ? w->delta_luma_weight_l1 : w->delta_luma_weight_l0;
+		s8 *lo = l ? w->luma_offset_l1 : w->luma_offset_l0;
+		s8 (*dc)[2] = l ? w->delta_chroma_weight_l1 : w->delta_chroma_weight_l0;
+		s8 (*co)[2] = l ? w->chroma_offset_l1 : w->chroma_offset_l0;
+		u32 cd = w->luma_log2_weight_denom + w->delta_chroma_log2_weight_denom;
+
+		if (!n[l])
+			break;
+		lf = cf = 0;
+		for (i = 0; i < n[l]; i++)
+			lf |= hevc_u(b, 1) << i;	/* luma_weight_lX_flag */
+		if (chroma)
+			for (i = 0; i < n[l]; i++)
+				cf |= hevc_u(b, 1) << i;	/* chroma_weight_lX_flag */
+		for (i = 0; i < n[l] && !b->error; i++) {
+			if (lf & BIT(i)) {
+				dl[i] = hevc_se(b);
+				lo[i] = hevc_se(b);
+			}
+			if (!(cf & BIT(i)))
+				continue;
+			for (j = 0; j < 2; j++) {
+				s32 cw, o;
+
+				dc[i][j] = hevc_se(b);
+				cw = (1 << cd) + dc[i][j];
+				o = 128 + hevc_se(b) - ((128 * cw) >> cd);
+				co[i][j] = clamp(o, -128, 127);
+			}
+		}
+	}
+}
+
+/*
+ * slice_segment_header() (7.3.6.1) of the NAL in @b (RBSP, from the NAL
+ * header) into @sp; dependent segments inherit from @indep. Returns the
+ * RBSP byte offset of slice_segment_data().
+ */
+static int hevc_parse_slice(struct hevc_bits *b, const struct v4l2_ctrl_hevc_sps *sps,
+			    const struct v4l2_ctrl_hevc_pps *pps,
+			    const struct v4l2_ctrl_hevc_decode_params *dp, u32 nctbs,
+			    const struct v4l2_ctrl_hevc_slice_params *indep,
+			    struct v4l2_ctrl_hevc_slice_params *sp)
+{
+	u32 nal_type = (b->p[0] >> 1) & 0x3f, i, n, total, first, dep = 0, addr = 0;
+	u32 list_entry[2][V4L2_HEVC_DPB_ENTRIES_NUM_MAX] = { };
+	bool sao = false, dbk_disabled, mod[2] = { };
+	u8 temp[2][V4L2_HEVC_DPB_ENTRIES_NUM_MAX];
+	unsigned int l, k;
+
+	hevc_u(b, 16);					/* NAL header */
+	first = hevc_u(b, 1);				/* first_slice_segment_in_pic_flag */
+	if (nal_type >= 16 && nal_type <= 23)
+		hevc_u(b, 1);				/* no_output_of_prior_pics_flag */
+	hevc_ue(b);					/* slice_pic_parameter_set_id */
+	if (!first) {
+		if (pps->flags & V4L2_HEVC_PPS_FLAG_DEPENDENT_SLICE_SEGMENT_ENABLED)
+			dep = hevc_u(b, 1);
+		addr = hevc_u(b, hevc_ceil_log2(nctbs));
+	}
+	if (dep) {
+		if (!indep)
+			return -EINVAL;
+		*sp = *indep;
+		sp->flags |= V4L2_HEVC_SLICE_PARAMS_FLAG_DEPENDENT_SLICE_SEGMENT;
+		sp->slice_segment_addr = addr;
+		goto entry_points;
+	}
+
+	memset(sp, 0, sizeof(*sp));
+	sp->nal_unit_type = nal_type;
+	sp->nuh_temporal_id_plus1 = b->p[1] & 7;
+	sp->slice_segment_addr = addr;
+	hevc_u(b, pps->num_extra_slice_header_bits);	/* slice_reserved_flag */
+	sp->slice_type = hevc_ue(b);
+	if (sp->slice_type > 2)
+		return -EINVAL;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_OUTPUT_FLAG_PRESENT)
+		hevc_u(b, 1);				/* pic_output_flag */
+	if (sps->flags & V4L2_HEVC_SPS_FLAG_SEPARATE_COLOUR_PLANE)
+		sp->colour_plane_id = hevc_u(b, 2);
+	sp->slice_pic_order_cnt = dp->pic_order_cnt_val;
+	if (nal_type != 19 && nal_type != 20) {		/* not IDR */
+		hevc_u(b, sps->log2_max_pic_order_cnt_lsb_minus4 + 4);
+		if (!hevc_u(b, 1))			/* short_term_ref_pic_set_sps_flag */
+			hevc_skip_st_rps(b, sps, dp);
+		else if (sps->num_short_term_ref_pic_sets > 1)
+			hevc_u(b, hevc_ceil_log2(sps->num_short_term_ref_pic_sets));
+		if (sps->flags & V4L2_HEVC_SPS_FLAG_LONG_TERM_REF_PICS_PRESENT) {
+			u32 nsps = 0, npics;
+
+			if (sps->num_long_term_ref_pics_sps)
+				nsps = hevc_ue(b);
+			npics = hevc_ue(b);
+			for (i = 0; i < nsps + npics && !b->error; i++) {
+				if (i < nsps) {
+					if (sps->num_long_term_ref_pics_sps > 1)
+						hevc_u(b, hevc_ceil_log2(sps->num_long_term_ref_pics_sps));
+				} else {
+					hevc_u(b, sps->log2_max_pic_order_cnt_lsb_minus4 + 4);
+					hevc_u(b, 1);	/* used_by_curr_pic_lt_flag */
+				}
+				if (hevc_u(b, 1))	/* delta_poc_msb_present_flag */
+					hevc_ue(b);
+			}
+		}
+		if ((sps->flags & V4L2_HEVC_SPS_FLAG_SPS_TEMPORAL_MVP_ENABLED) && hevc_u(b, 1))
+			sp->flags |= V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_TEMPORAL_MVP_ENABLED;
+	}
+	if (sps->flags & V4L2_HEVC_SPS_FLAG_SAMPLE_ADAPTIVE_OFFSET) {
+		if (hevc_u(b, 1))
+			sp->flags |= V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_SAO_LUMA;
+		if (sps->chroma_format_idc && hevc_u(b, 1))
+			sp->flags |= V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_SAO_CHROMA;
+		sao = sp->flags & (V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_SAO_LUMA |
+				   V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_SAO_CHROMA);
+	}
+	sp->collocated_ref_idx = 0;
+	if (sp->slice_type != 2) {			/* P or B */
+		sp->num_ref_idx_l0_active_minus1 = pps->num_ref_idx_l0_default_active_minus1;
+		sp->num_ref_idx_l1_active_minus1 = pps->num_ref_idx_l1_default_active_minus1;
+		if (hevc_u(b, 1)) {			/* num_ref_idx_active_override_flag */
+			sp->num_ref_idx_l0_active_minus1 = hevc_ue(b);
+			if (sp->slice_type == 0)
+				sp->num_ref_idx_l1_active_minus1 = hevc_ue(b);
+		}
+		if (sp->num_ref_idx_l0_active_minus1 >= V4L2_HEVC_DPB_ENTRIES_NUM_MAX ||
+		    sp->num_ref_idx_l1_active_minus1 >= V4L2_HEVC_DPB_ENTRIES_NUM_MAX)
+			return -EINVAL;
+		total = dp->num_poc_st_curr_before + dp->num_poc_st_curr_after + dp->num_poc_lt_curr;
+		if ((pps->flags & V4L2_HEVC_PPS_FLAG_LISTS_MODIFICATION_PRESENT) && total > 1) {
+			for (l = 0; l < (sp->slice_type == 0 ? 2U : 1U); l++) {
+				n = (l ? sp->num_ref_idx_l1_active_minus1 :
+				     sp->num_ref_idx_l0_active_minus1) + 1;
+				mod[l] = hevc_u(b, 1);
+				for (i = 0; mod[l] && i < n; i++)
+					list_entry[l][i] = hevc_u(b, hevc_ceil_log2(total));
+			}
+		}
+		if (sp->slice_type == 0 && hevc_u(b, 1))
+			sp->flags |= V4L2_HEVC_SLICE_PARAMS_FLAG_MVD_L1_ZERO;
+		if ((pps->flags & V4L2_HEVC_PPS_FLAG_CABAC_INIT_PRESENT) && hevc_u(b, 1))
+			sp->flags |= V4L2_HEVC_SLICE_PARAMS_FLAG_CABAC_INIT;
+		if (sp->flags & V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_TEMPORAL_MVP_ENABLED) {
+			bool from_l0 = sp->slice_type != 0 || hevc_u(b, 1);
+
+			if (from_l0)
+				sp->flags |= V4L2_HEVC_SLICE_PARAMS_FLAG_COLLOCATED_FROM_L0;
+			if ((from_l0 && sp->num_ref_idx_l0_active_minus1) ||
+			    (!from_l0 && sp->num_ref_idx_l1_active_minus1))
+				sp->collocated_ref_idx = hevc_ue(b);
+		}
+		if (((pps->flags & V4L2_HEVC_PPS_FLAG_WEIGHTED_PRED) && sp->slice_type == 1) ||
+		    ((pps->flags & V4L2_HEVC_PPS_FLAG_WEIGHTED_BIPRED) && sp->slice_type == 0))
+			hevc_parse_pwt(b, sps, sp);
+		sp->five_minus_max_num_merge_cand = hevc_ue(b);
+
+		/* reference picture lists (8.3.4), as DPB indices */
+		for (l = 0; l < (sp->slice_type == 0 ? 2U : 1U) && total; l++) {
+			u32 rps_n = max_t(u32, total, (l ? sp->num_ref_idx_l1_active_minus1 :
+						      sp->num_ref_idx_l0_active_minus1) + 1);
+			const u8 *first_set = l ? dp->poc_st_curr_after : dp->poc_st_curr_before;
+			const u8 *second_set = l ? dp->poc_st_curr_before : dp->poc_st_curr_after;
+			u32 nfirst = l ? dp->num_poc_st_curr_after : dp->num_poc_st_curr_before;
+			u32 nsecond = l ? dp->num_poc_st_curr_before : dp->num_poc_st_curr_after;
+			u8 *out = l ? sp->ref_idx_l1 : sp->ref_idx_l0;
+
+			rps_n = min_t(u32, rps_n, V4L2_HEVC_DPB_ENTRIES_NUM_MAX);
+			for (k = 0; k < rps_n;) {
+				for (i = 0; i < nfirst && k < rps_n; i++)
+					temp[l][k++] = first_set[i];
+				for (i = 0; i < nsecond && k < rps_n; i++)
+					temp[l][k++] = second_set[i];
+				for (i = 0; i < dp->num_poc_lt_curr && k < rps_n; i++)
+					temp[l][k++] = dp->poc_lt_curr[i];
+			}
+			n = (l ? sp->num_ref_idx_l1_active_minus1 : sp->num_ref_idx_l0_active_minus1) + 1;
+			for (i = 0; i < n; i++)
+				out[i] = temp[l][mod[l] ? min_t(u32, list_entry[l][i], rps_n - 1) : i];
+		}
+	}
+	sp->slice_qp_delta = hevc_se(b);
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_PPS_SLICE_CHROMA_QP_OFFSETS_PRESENT) {
+		sp->slice_cb_qp_offset = hevc_se(b);
+		sp->slice_cr_qp_offset = hevc_se(b);
+	}
+	dbk_disabled = pps->flags & V4L2_HEVC_PPS_FLAG_PPS_DISABLE_DEBLOCKING_FILTER;
+	sp->slice_beta_offset_div2 = pps->pps_beta_offset_div2;
+	sp->slice_tc_offset_div2 = pps->pps_tc_offset_div2;
+	if ((pps->flags & V4L2_HEVC_PPS_FLAG_DEBLOCKING_FILTER_OVERRIDE_ENABLED) &&
+	    hevc_u(b, 1)) {				/* deblocking_filter_override_flag */
+		dbk_disabled = hevc_u(b, 1);
+		if (!dbk_disabled) {
+			sp->slice_beta_offset_div2 = hevc_se(b);
+			sp->slice_tc_offset_div2 = hevc_se(b);
+		}
+	}
+	if (dbk_disabled)
+		sp->flags |= V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_DEBLOCKING_FILTER_DISABLED;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_PPS_LOOP_FILTER_ACROSS_SLICES_ENABLED) {
+		if (!(sao || !dbk_disabled) || hevc_u(b, 1))
+			sp->flags |= V4L2_HEVC_SLICE_PARAMS_FLAG_SLICE_LOOP_FILTER_ACROSS_SLICES_ENABLED;
+	}
+
+entry_points:
+	sp->num_entry_point_offsets = 0;
+	if (pps->flags & (V4L2_HEVC_PPS_FLAG_TILES_ENABLED |
+			  V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED)) {
+		n = hevc_ue(b);
+		sp->num_entry_point_offsets = n;
+		if (n) {
+			u32 len = hevc_ue(b) + 1;	/* offset_len_minus1 */
+
+			if (len > 32)
+				return -EINVAL;
+			for (i = 0; i < n && !b->error; i++)
+				hevc_u(b, len);
+		}
+	}
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_SLICE_SEGMENT_HEADER_EXTENSION_PRESENT) {
+		n = hevc_ue(b);
+		for (i = 0; i < n && !b->error; i++)
+			hevc_u(b, 8);
+	}
+	/* byte_alignment(): alignment_bit_equal_to_one, then zeros */
+	hevc_u(b, 1);
+	if (b->pos & 7)
+		hevc_u(b, 8 - (b->pos & 7));
+	if (b->error)
+		return -EINVAL;
+	return b->pos >> 3;
+}
+
+/*
+ * Frame-based request without slice parameters: copy every VCL NAL of the
+ * OUTPUT buffer as RBSP and parse its slice segment header into h->fsp.
+ */
+static int hevc_frame_slices(struct hivdec_ctx *ctx, const struct v4l2_ctrl_hevc_sps *sps,
+			     const struct v4l2_ctrl_hevc_pps *pps,
+			     const struct v4l2_ctrl_hevc_decode_params *dp, u32 nctbs,
+			     const u8 *data, u32 size, u32 *count, u32 *used)
+{
+	struct hivdec_hevc_ctx *h = ctx->priv;
+	const struct v4l2_ctrl_hevc_slice_params *indep = NULL;
+	u32 i, start, end, n = 0, dummy;
+	int ret;
+
+	for (i = 0; i + 2 < size; i++) {
+		struct hevc_bits b = { };
+		u32 rbsp;
+
+		if (data[i] || data[i + 1] || data[i + 2] != 1)
+			continue;
+		start = i + 3;
+		for (end = start; end + 2 < size; end++)
+			if (!data[end] && !data[end + 1] && (data[end + 2] == 1 || !data[end + 2]))
+				break;
+		if (end + 2 >= size)
+			end = size;
+		i = end - 1;
+		if (end - start < 3 || ((data[start] >> 1) & 0x3f) > 31)
+			continue;			/* not a VCL NAL */
+		if (n == HEVC_MAX_SLICES || *used + (end - start) + 64 > h->stream.size)
+			return -ENOSPC;
+		h->slices[n].offset = *used;
+		rbsp = hevc_nal_to_rbsp(h->stream.cpu + *used, data + start, end - start, 0, &dummy);
+		b.p = h->stream.cpu + *used;
+		b.len = rbsp;
+		ret = hevc_parse_slice(&b, sps, pps, dp, nctbs, indep, &h->fsp[n]);
+		if (ret < 0 || ret >= rbsp) {
+			if (ctx->dev->debug)
+				dev_info(ctx->dev->dev, "hevc: slice %u header parse %d\n", n, ret);
+			return -EINVAL;
+		}
+		if (!(h->fsp[n].flags & V4L2_HEVC_SLICE_PARAMS_FLAG_DEPENDENT_SLICE_SEGMENT))
+			indep = &h->fsp[n];
+		h->fsp[n].data_byte_offset = ret;
+		h->fsp[n].bit_size = rbsp * 8;
+		h->slices[n].data_byte = ret;
+		h->slices[n].bits = hevc_payload_bits(h->stream.cpu + *used + ret, rbsp - ret);
+		if (ctx->dev->debug > 1)
+			dev_info(ctx->dev->dev, "  slice %u: nal %u..%u rbsp %u data %u bits %u addr %u type %u (parsed)\n",
+				 n, start, end, rbsp, ret, h->slices[n].bits,
+				 h->fsp[n].slice_segment_addr, h->fsp[n].slice_type);
+		memset(h->stream.cpu + *used + rbsp, 0, 32);
+		*used = ALIGN(*used + rbsp + 32, 64);
+		n++;
+	}
+	*count = n;
+	return n ? 0 : -EINVAL;
+}
+
 /* ---------------------------------------------------------------- decode */
 
 struct hevc_pic {
@@ -544,6 +932,8 @@ static int hivdec_hevc_run(struct hivdec_ctx *ctx)
 	sps_arr = sctrl->p_cur.p;
 	n = sctrl->elems;
 	if (!data || !n || n > HEVC_MAX_SLICES) {
+		if (vdec->debug)
+			dev_info(vdec->dev, "hevc: %u slice params, %u bytes\n", n, size);
 		ret = -EINVAL;
 		goto out;
 	}
@@ -583,61 +973,69 @@ static int hivdec_hevc_run(struct hivdec_ctx *ctx)
 	pic.luma = dbuf->map.iova;
 	pic.mv = dbuf->mv.map.iova;
 
-	/*
-	 * slices: data_byte_offset locates slice_segment_data() in RBSP terms
-	 * (emulation prevention bytes of the header not counted). GStreamer
-	 * counts it from the slice's own start code, libva-v4l2-request from
-	 * the start of the OUTPUT buffer; the latter is recognised by every
-	 * offset falling inside its own slice. Each slice NAL is copied as
-	 * RBSP (the VDH does not drop emulation prevention bytes).
-	 */
-	nsc = 0;
-	for (i = 0; i + 2 < size && nsc < ARRAY_SIZE(h->sc); i++) {
-		if (!data[i] && !data[i + 1] && data[i + 2] == 1) {
-			h->sc[nsc++] = i;
-			i += 2;
+	/* Chromium sends no slice parameters: parse the slice headers here */
+	if (n == 1 && !sps_arr[0].bit_size && !sps_arr[0].data_byte_offset) {
+		ret = hevc_frame_slices(ctx, sps, pps, dp, pic.nctbs, data, size, &n, &used);
+		if (ret)
+			goto out;
+		sps_arr = h->fsp;
+	} else {
+		/*
+		 * slices: data_byte_offset locates slice_segment_data() in RBSP terms
+		 * (emulation prevention bytes of the header not counted). GStreamer
+		 * counts it from the slice's own start code, libva-v4l2-request from
+		 * the start of the OUTPUT buffer; the latter is recognised by every
+		 * offset falling inside its own slice. Each slice NAL is copied as
+		 * RBSP (the VDH does not drop emulation prevention bytes).
+		 */
+		nsc = 0;
+		for (i = 0; i + 2 < size && nsc < ARRAY_SIZE(h->sc); i++) {
+			if (!data[i] && !data[i + 1] && data[i + 2] == 1) {
+				h->sc[nsc++] = i;
+				i += 2;
+			}
 		}
-	}
-	if (nsc < n) {
-		ret = -EINVAL;
-		goto out;
-	}
-	abs_off = true;
-	for (k = 0; k < n && abs_off; k++) {
-		u32 hi = k + 1 < nsc ? h->sc[k + 1] : size;
-
-		if (sps_arr[k].data_byte_offset <= h->sc[k] + 3 ||
-		    sps_arr[k].data_byte_offset >= hi)
-			abs_off = false;
-	}
-	for (k = 0; k < n; k++) {
-		const struct v4l2_ctrl_hevc_slice_params *sp = &sps_arr[k];
-		u32 nal = h->sc[k] + 3, end = k + 1 < nsc ? h->sc[k + 1] : size;
-		u32 roff = abs_off ? sp->data_byte_offset - nal : sp->data_byte_offset - 3;
-		u32 rbsp, dummy;
-
-		if (!abs_off && sp->data_byte_offset < 3) {
+		if (nsc < n) {
 			ret = -EINVAL;
 			goto out;
 		}
-		if (used + (end - nal) + 64 > h->stream.size) {
-			ret = -ENOSPC;
-			goto out;
+		abs_off = true;
+		for (k = 0; k < n && abs_off; k++) {
+			u32 hi = k + 1 < nsc ? h->sc[k + 1] : size;
+
+			if (sps_arr[k].data_byte_offset <= h->sc[k] + 3 ||
+			    sps_arr[k].data_byte_offset >= hi)
+				abs_off = false;
 		}
-		h->slices[k].offset = used;
-		rbsp = hevc_nal_to_rbsp(h->stream.cpu + used, data + nal, end - nal, 0, &dummy);
-		if (roff >= rbsp) {
-			ret = -EINVAL;
-			goto out;
+		for (k = 0; k < n; k++) {
+			const struct v4l2_ctrl_hevc_slice_params *sp = &sps_arr[k];
+			u32 nal = h->sc[k] + 3, end = k + 1 < nsc ? h->sc[k + 1] : size;
+			u32 roff = abs_off ? sp->data_byte_offset - nal : sp->data_byte_offset - 3;
+			u32 rbsp, dummy;
+
+			if (!abs_off && sp->data_byte_offset < 3) {
+				ret = -EINVAL;
+				goto out;
+			}
+			if (used + (end - nal) + 64 > h->stream.size) {
+				ret = -ENOSPC;
+				goto out;
+			}
+			h->slices[k].offset = used;
+			rbsp = hevc_nal_to_rbsp(h->stream.cpu + used, data + nal, end - nal, 0, &dummy);
+			if (roff >= rbsp) {
+				ret = -EINVAL;
+				goto out;
+			}
+			h->slices[k].data_byte = roff;
+			h->slices[k].bits = hevc_payload_bits(h->stream.cpu + used + roff, rbsp - roff);
+			if (vdec->debug > 1)
+				dev_info(vdec->dev, "  slice %u: nal %u..%u rbsp %u data %u bits %u addr %u%s\n",
+					 k, nal, end, rbsp, roff, h->slices[k].bits,
+					 sp->slice_segment_addr, abs_off ? "" : " (rel)");
+			memset(h->stream.cpu + used + rbsp, 0, 32);
+			used = ALIGN(used + rbsp + 32, 64);
 		}
-		h->slices[k].data_byte = roff;
-		h->slices[k].bits = hevc_payload_bits(h->stream.cpu + used + roff, rbsp - roff);
-		if (vdec->debug > 1)
-			dev_info(vdec->dev, "  slice %u: nal %u..%u rbsp %u data %u bits %u addr %u%s\n",
-				 k, nal, end, rbsp, roff, h->slices[k].bits,
-				 sp->slice_segment_addr, abs_off ? "" : " (rel)");
-		memset(h->stream.cpu + used + rbsp, 0, 32);
-		used = ALIGN(used + rbsp + 32, 64);
 	}
 
 	/* DPB -> capture buffers -> stable slots */

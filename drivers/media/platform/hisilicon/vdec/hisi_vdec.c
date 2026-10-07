@@ -41,7 +41,7 @@ static const struct hivdec_ctrl_desc hivdec_h264_ctrls[] = {
 	{
 		.cfg.id = V4L2_CID_STATELESS_H264_DECODE_MODE,
 		.cfg.min = V4L2_STATELESS_H264_DECODE_MODE_SLICE_BASED,
-		.cfg.max = V4L2_STATELESS_H264_DECODE_MODE_SLICE_BASED,
+		.cfg.max = V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED,
 		.cfg.def = V4L2_STATELESS_H264_DECODE_MODE_SLICE_BASED,
 	},
 	{
@@ -90,6 +90,8 @@ static const struct hivdec_ctrl_desc hivdec_hevc_ctrls[] = {
 		.cfg.id = V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
 		.cfg.min = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
 		.cfg.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10,
+		/* 10-bit decodes to single-plane P010, which Chromium cannot lay out */
+		.cfg.menu_skip_mask = BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10),
 		.cfg.def = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
 	},
 	{
@@ -106,7 +108,8 @@ static const struct hivdec_ctrl_desc hivdec_vp9_ctrls[] = {
 		.cfg.id = V4L2_CID_MPEG_VIDEO_VP9_PROFILE,
 		.cfg.min = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
 		.cfg.max = V4L2_MPEG_VIDEO_VP9_PROFILE_2,
-		.cfg.menu_skip_mask = BIT(V4L2_MPEG_VIDEO_VP9_PROFILE_1),
+		.cfg.menu_skip_mask = BIT(V4L2_MPEG_VIDEO_VP9_PROFILE_1) |
+				      BIT(V4L2_MPEG_VIDEO_VP9_PROFILE_2),
 		.cfg.def = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
 	},
 };
@@ -377,8 +380,7 @@ static int hivdec_querycap(struct file *file, void *priv,
 
 	strscpy(cap->driver, vdec->dev->driver->name, sizeof(cap->driver));
 	strscpy(cap->card, vdev->name, sizeof(cap->card));
-	snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:%s",
-		 vdec->dev->driver->name);
+	/* bus_info is filled in by the core, matching the media device */
 	return 0;
 }
 
@@ -974,6 +976,9 @@ static void hivdec_device_run(void *priv)
 		return;
 	}
 	ret = ctx->coded_fmt_desc->ops->run(ctx);
+	if (ret < 0)
+		dev_info_ratelimited(vdec->dev, "%.4s job failed: %d\n",
+				     (const char *)&ctx->coded_fmt_desc->fourcc, ret);
 	if (ret)
 		hivdec_job_finish(ctx, ret > 0 ? VB2_BUF_STATE_DONE :
 						 VB2_BUF_STATE_ERROR);
@@ -1121,7 +1126,6 @@ static int hivdec_v4l2_init(struct hivdec_dev *vdec)
 
 	vdec->mdev.dev = vdec->dev;
 	strscpy(vdec->mdev.model, "hisi-vdec", sizeof(vdec->mdev.model));
-	strscpy(vdec->mdev.bus_info, "platform:hisi-vdec", sizeof(vdec->mdev.bus_info));
 	media_device_init(&vdec->mdev);
 	vdec->mdev.ops = &hivdec_media_ops;
 	vdec->v4l2_dev.mdev = &vdec->mdev;
