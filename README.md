@@ -21,11 +21,12 @@ needed to run it on the Huawei Qingyun L410 laptop. Everything L410-specific is 
 | WiFi / 蓝牙 Hi1103 | `drivers/staging/hi110x`（厂商驱动移植） | WPA2/WPA3 可用，蓝牙可用 |
 | 显示 eDP 2160×1440 | `kirin990-dss`（接管 UEFI 点亮的管线） | 60 Hz，关屏整条链断电，硬件光标 |
 | GPU Mali-G76 MP16 | 主线 Panfrost | Mesa panfrost，OpenGL ES 3.1 / OpenGL 3.1 |
+| 视频解码 VDH | `hisi-vdec`（新写的 V4L2 无状态解码驱动） | H.264、HEVC Main/Main10、VP9 profile 0/2、VP8、MPEG-2；GStreamer 自动使用，Chromium 的设置见 l410-mainline |
 | 声卡 Hi6405 + 2×TAS2562 | `sound/soc/hisilicon/hi6405`（厂商驱动移植） | 扬声器、耳机、内置麦克风 |
 | 键盘、触控板、电池、合盖 | i2c-hid、`huawei-echub` EC 驱动 | 正常 |
 | 系统睡眠 | `kirin990-sr` | s2idle 默认可用；deep 唤醒后会冷启动 |
 
-不支持：DP/HDMI 输出、指纹、硬件视频编解码。
+不支持：DP/HDMI 输出、指纹、硬件视频编码。
 
 ## 编译
 
